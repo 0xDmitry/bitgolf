@@ -1,5 +1,3 @@
-const { test } = require('brittle')
-
-test('REMOVE ME', (t) => {
-  t.pass()
-})
+require('../workers/worker-task.test.js')
+require('../app.test.js')
+require('../workers/index.test.js')

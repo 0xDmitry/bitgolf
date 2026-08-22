@@ -97,7 +97,14 @@ npm start -- --no-updates
 
 ### Workers
 
-The main CLI starts `workers/main.js` as a Bare sidecar and communicates with it over framed IPC.
+The CLI starts two independent Bare workers and communicates with each over its own framed IPC stream:
+
+- `workers/main.js` owns Pear Runtime updates.
+- `workers/index.js` owns game commands and will hold the authoritative game state and rules.
+
+Game IPC uses JSON objects with a required `type`. The worker currently exposes a readiness event and a `game:ping` health check; game-specific commands and state transitions belong in `workers/worker-task.js`.
+
+`await app.ready()` waits for the game worker's readiness handshake. After that, `app.sendGame(message)` sends a structured command; an unavailable worker is reported as an error instead of accepting a move that cannot be handled.
 
 ## Peer-to-Peer Deployments
 
@@ -132,10 +139,15 @@ npx pear-install pear://<key>
 ## Project Structure
 
 - `bin.mjs` - CLI entrypoint and runtime wiring
-- `app.js` - update resource used by the entrypoint
-- `workers/main.js` - Bare worker example
+- `app.test.js` - app IPC contract tests
+- `app.js` - lifecycle and IPC wiring for both workers
+- `workers/main.js` - Bare updater worker
+- `workers/index.js` - Bare game worker entrypoint
+- `workers/index.test.js` - real game worker IPC test
+- `workers/worker-task.test.js` - game command unit tests
+- `workers/worker-task.js` - game command boundary and future authoritative game logic
 - `scripts/make.js` - platform/arch build target selector
-- `test/index.js` - brittle-bare tests
+- `test/index.js` - colocated test-suite aggregator
 
 ## Troubleshooting
 

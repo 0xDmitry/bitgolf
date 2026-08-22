@@ -47,6 +47,8 @@ app.on('updated', () => console.log('[updater] update complete... applying'))
 app.on('update-applied', () =>
   console.log('[updater] applied update, restart to run latest version')
 )
+app.on('game-ready', () => console.log('[game] worker ready'))
+app.on('game-error', ({ code, error }) => console.error(`[game:${code}]`, error))
 app.on('error', (err) => console.error('[app:error]', err))
 
 process.on('SIGHUP', () => app.exit(129))
