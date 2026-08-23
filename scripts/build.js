@@ -2,6 +2,7 @@
 'use strict'
 
 const fs = require('fs')
+const crypto = require('crypto')
 const path = require('path')
 const { spawnSync } = require('child_process')
 
@@ -54,6 +55,39 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+const stale = []
+for (const [host, app] of builds) {
+  const metadataPath = path.join(path.dirname(app), 'build.json')
+  let metadata = null
+
+  try {
+    metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+  } catch {
+    stale.push([host, 'missing or invalid build.json'])
+    continue
+  }
+
+  const stat = fs.statSync(app)
+  if (
+    metadata.name !== appName ||
+    metadata.version !== pkg.version ||
+    metadata.host !== host ||
+    metadata.file !== path.basename(app) ||
+    metadata.size !== stat.size ||
+    metadata.sha256 !== sha256(app)
+  ) {
+    stale.push([host, `artifact does not match ${appName} v${pkg.version}`])
+  }
+}
+
+if (stale.length > 0) {
+  console.error('Stale CLI build artifacts:')
+  for (const [host, reason] of stale) {
+    console.error(`  ${host}: ${reason} (run npm run make:${host})`)
+  }
+  process.exit(1)
+}
+
 const pearArgs = ['build', '--package', path.join(root, 'package.json')]
 for (const [host, app] of builds) pearArgs.push(`--${host}-app`, app)
 pearArgs.push('--target', target)
@@ -70,3 +104,20 @@ if (result.error) {
 
 if (result.status !== 0) process.exit(result.status || 1)
 console.log(`Pear deployment assembled at ${target}`)
+
+function sha256(file) {
+  const hash = crypto.createHash('sha256')
+  const buffer = Buffer.allocUnsafe(1024 * 1024)
+  const fd = fs.openSync(file, 'r')
+
+  try {
+    let bytes = 0
+    while ((bytes = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, bytes))
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+
+  return hash.digest('hex')
+}
