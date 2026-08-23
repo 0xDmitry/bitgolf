@@ -13,12 +13,12 @@
     "generate-bootstrap-key": "node scripts/generate-bootstrap-key.js",
     "build": "node scripts/build.js",
     "make": "node scripts/make.js",
-    "make:darwin-arm64": "bare-build --name bitgolf --standalone --host darwin-arm64 --out ./out/darwin-arm64 bin.mjs",
-    "make:darwin-x64": "bare-build --name bitgolf --standalone --host darwin-x64 --out ./out/darwin-x64 bin.mjs",
-    "make:linux-arm64": "bare-build --name bitgolf --standalone --host linux-arm64 --out ./out/linux-arm64 bin.mjs",
-    "make:linux-x64": "bare-build --name bitgolf --standalone --host linux-x64 --out ./out/linux-x64 bin.mjs",
-    "make:win32-arm64": "bare-build --name bitgolf --standalone --host win32-arm64 --out ./out/win32-arm64 bin.mjs",
-    "make:win32-x64": "bare-build --name bitgolf --standalone --host win32-x64 --out ./out/win32-x64 bin.mjs"
+    "make:darwin-arm64": "node scripts/make-target.js darwin-arm64",
+    "make:darwin-x64": "node scripts/make-target.js darwin-x64",
+    "make:linux-arm64": "node scripts/make-target.js linux-arm64",
+    "make:linux-x64": "node scripts/make-target.js linux-x64",
+    "make:win32-arm64": "node scripts/make-target.js win32-arm64",
+    "make:win32-x64": "node scripts/make-target.js win32-x64"
   },
   "dependencies": {
     "autobase": "7.28.1",
