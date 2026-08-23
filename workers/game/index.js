@@ -4,28 +4,39 @@ const Autobase = require('autobase')
 const Corestore = require('corestore')
 const ReadyResource = require('ready-resource')
 
+const CHALLENGES = require('./challenges.js')
 const { GAME_BOOTSTRAP_KEY } = require('./constants.js')
 const {
+  bitmapId,
   createSubmission,
   decodeSubmission,
   encodeSubmission,
   isValidSubmission
 } = require('./protocol.js')
-const { verifyProgram } = require('./verifier.js')
+const { verifySubmission } = require('./verifier.js')
 const { reduceEvents } = require('./reducer.js')
 const GameNetwork = require('./network.js')
 
 const EVENT_VIEW_NAME = 'events'
+const CURRENT_CHALLENGE = CHALLENGES[CHALLENGES.length - 1]
+const CURRENT_CHALLENGE_ID = bitmapId(CURRENT_CHALLENGE.target)
 
 module.exports = class Game extends ReadyResource {
   constructor(
     storage,
-    { bootstrapKey = GAME_BOOTSTRAP_KEY, network = true, swarm = null, autobase = {} } = {}
+    {
+      bootstrapKey = GAME_BOOTSTRAP_KEY,
+      challengeId = CURRENT_CHALLENGE_ID,
+      network = true,
+      swarm = null,
+      autobase = {}
+    } = {}
   ) {
     super()
 
     this.storage = storage
     this.bootstrapKey = bootstrapKey
+    this.challengeId = challengeId
     this.networkEnabled = network !== false
     this.swarm = swarm
     this.autobaseOptions = autobase
@@ -36,7 +47,7 @@ module.exports = class Game extends ReadyResource {
     this.state = {
       playerKey: null,
       peers: 0,
-      leaderboard: []
+      ...reduceEvents([])
     }
 
     this._refreshTail = Promise.resolve()
@@ -86,18 +97,29 @@ module.exports = class Game extends ReadyResource {
     await this._closeResources()
   }
 
-  async submit(program) {
-    const result = verifyProgram(program)
-    const event = createSubmission(program)
+  async submit(program, challengeId = this.challengeId) {
+    let event
+
+    try {
+      event = createSubmission(program, challengeId)
+    } catch {
+      return { valid: false, score: 0, challenge: challengeId }
+    }
+
+    const result = verifySubmission(event)
 
     if (!result.valid || !isValidSubmission(event)) {
-      return { valid: false, score: result.valid ? null : result.score }
+      return {
+        valid: false,
+        score: result.valid ? null : result.score,
+        challenge: event.challenge
+      }
     }
 
     await this.base.append(encodeSubmission(event), { optimistic: true })
     await this.refresh()
 
-    return result
+    return { ...result, challenge: event.challenge }
   }
 
   refresh() {
@@ -190,7 +212,7 @@ async function applyGameEvents(nodes, view, host) {
     const event = decodeSubmission(node.value)
     if (!isValidSubmission(event)) continue
 
-    const result = verifyProgram(event.program)
+    const result = verifySubmission(event)
     if (!result.valid) continue
 
     await host.ackWriter(node.from.key)
@@ -229,11 +251,25 @@ function pickAutobaseOptions(options) {
 
 function sameState(a, b) {
   if (a.playerKey !== b.playerKey || a.peers !== b.peers) return false
-  if (a.leaderboard.length !== b.leaderboard.length) return false
+  const leftIds = Object.keys(a.leaderboards)
+  const rightIds = Object.keys(b.leaderboards)
 
-  for (let i = 0; i < a.leaderboard.length; i++) {
-    const left = a.leaderboard[i]
-    const right = b.leaderboard[i]
+  if (leftIds.length !== rightIds.length) return false
+
+  for (const id of leftIds) {
+    if (!Object.prototype.hasOwnProperty.call(b.leaderboards, id)) return false
+    if (!sameLeaderboard(a.leaderboards[id], b.leaderboards[id])) return false
+  }
+
+  return true
+}
+
+function sameLeaderboard(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i]
+    const right = b[i]
 
     if (
       left.program !== right.program ||

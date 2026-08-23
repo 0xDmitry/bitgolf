@@ -100,7 +100,7 @@ module.exports = class WorkerTask extends ReadyResource {
     }
 
     if (message.type === 'game:submit') {
-      const result = await this.game.submit(message.program)
+      const result = await this.game.submit(message.program, message.challenge)
       this._send({
         type: 'game:submit-result',
         requestId: message.requestId,
@@ -131,7 +131,7 @@ module.exports = class WorkerTask extends ReadyResource {
       requestId,
       playerKey: state.playerKey,
       peers: state.peers,
-      leaderboard: state.leaderboard
+      leaderboards: state.leaderboards
     })
   }
 

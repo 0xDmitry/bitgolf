@@ -2,6 +2,22 @@ const { test } = require('brittle')
 const { PassThrough } = require('bare-stream')
 
 const Terminal = require('../terminal.js')
+const { TARGET_PROGRAM } = require('./helpers/programs.js')
+const CHALLENGES = require('../workers/game/challenges.js')
+const { bitmapId } = require('../workers/game/protocol.js')
+
+const CHALLENGE_ID = bitmapId(CHALLENGES[0].target)
+
+const TARGET_ROWS = [
+  '····█···',
+  '···█····',
+  '··███···',
+  '···███··',
+  '·██████·',
+  '····███·',
+  '··████··',
+  '···██···'
+]
 
 test('terminal labels the local player and safely shortens other player ids', async (t) => {
   const input = new PassThrough()
@@ -18,18 +34,20 @@ test('terminal labels the local player and safely shortens other player ids', as
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 3,
-    leaderboard: [
-      {
-        score: 1,
-        author: '82af91' + '0'.repeat(58),
-        program: '\u001b[31mx'
-      },
-      {
-        score: 2,
-        author: '91ac72' + '0'.repeat(58),
-        program: ' \ta!\n '
-      }
-    ]
+    leaderboards: {
+      [CHALLENGE_ID]: [
+        {
+          score: 1,
+          author: '82af91' + '0'.repeat(58),
+          program: '\u001b[31mx'
+        },
+        {
+          score: 2,
+          author: '91ac72' + '0'.repeat(58),
+          program: ' \ta!\n '
+        }
+      ]
+    }
   })
   terminal.showSubmission({ valid: true, score: 1 })
   await new Promise((resolve) => setTimeout(resolve, 0))
@@ -65,14 +83,27 @@ test('terminal accepts piped lines and renders remote state updates', async (t) 
   input.write('a\r\n')
   await new Promise((resolve) => setTimeout(resolve, 0))
 
+  t.alike(programs, [])
+  t.ok(chunks.join('').includes('1 byte · syntax valid · target mismatch'))
+  t.ok(chunks.join('').includes('OUTPUT     TARGET     DIFF'))
+  t.ok(chunks.join('').includes(`│····████│ │${TARGET_ROWS[0]}│ │·····███│`))
+  t.ok(chunks.join('').includes('target-matching lines submit automatically'))
+  t.absent(chunks.join('').includes('ENTER when matched'))
+
+  input.write(`${TARGET_PROGRAM}\r\n`)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  t.ok(chunks.join('').includes(`${TARGET_PROGRAM.length} bytes · target matched`))
+  t.ok(chunks.join('').includes('DIFF · exact match'))
+
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 1,
-    leaderboard: []
+    leaderboards: { [CHALLENGE_ID]: [] }
   })
   await new Promise((resolve) => setTimeout(resolve, 0))
 
-  t.alike(programs, ['a'])
+  t.alike(programs, [TARGET_PROGRAM])
   t.ok(chunks.join('').includes('connecting...'))
   t.ok(chunks.join('').includes('connected · 1 peer'))
 })
@@ -99,7 +130,7 @@ test('interactive terminal opens with a descriptive navigable menu', async (t) =
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 0,
-    leaderboard: []
+    leaderboards: { [CHALLENGE_ID]: [] }
   })
   await tick()
 
@@ -212,6 +243,8 @@ test('tutorial treats CRLF as one step and completes into the challenge', async 
 
   t.is(terminal.tutorialPage, 2)
   t.ok(plainLatestScreen(chunks).includes('TUTORIAL 3/3 · Valid programs and scoring'))
+  t.ok(plainLatestScreen(chunks).includes('Only programs that draw the target can be submitted'))
+  t.ok(plainLatestScreen(chunks).includes('The live preview and diff update after every edit.'))
   t.ok(plainLatestScreen(chunks).includes('ENTER solve challenge'))
 
   input.write('\r\n')
@@ -243,7 +276,93 @@ test('short tutorial keeps its footer and truncates content from the top', async
   t.absent(screen.includes('PgUp/PgDn'))
 })
 
-test('terminal reevaluates live edits and only submits valid programs', async (t) => {
+test('challenge renders the exact target and a meaningful live diff', async (t) => {
+  const { input, output, chunks } = interactiveStreams()
+  const terminal = new Terminal({ input, output })
+
+  t.teardown(() => terminal.close(), { force: true })
+
+  await terminal.ready()
+  input.write('2')
+  await tick()
+
+  let screen = plainLatestScreen(chunks)
+  const emptyPanels = TARGET_ROWS.map((row) => `│        │ │${row}│ │        │`).join('\r\n')
+
+  t.ok(screen.includes('OUTPUT     TARGET     DIFF'))
+  t.ok(screen.includes(emptyPanels))
+  t.ok(screen.includes('DIFF · unavailable until output can be evaluated'))
+  t.ok(screen.includes('ENTER when matched · Esc menu'))
+
+  input.write('a')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes('│····████│ │····█···│ │·····███│'))
+  t.ok(screen.includes('1 byte · syntax valid · target mismatch'))
+  t.ok(screen.includes('DIFF · 29 mismatches · █ marks a mismatch'))
+  t.ok(screen.includes('ENTER when matched · Esc menu'))
+
+  input.write('b')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes('2 bytes · stack 2 · incomplete'))
+  t.ok(screen.includes('2 bytes · stack 2 · incomplete · top preview'))
+  t.ok(screen.includes('DIFF · '))
+  t.absent(screen.includes('DIFF · unavailable'))
+
+  input.write('\x7f\x7f&')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes('1 byte · invalid'))
+  t.ok(screen.includes('DIFF · unavailable until output can be evaluated'))
+
+  output.columns = 32
+  output.rows = 24
+  output.emit('resize')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes('OUTPUT    TARGET    DIFF'))
+  t.ok(screen.includes('┌────────┐┌────────┐┌────────┐'))
+  t.ok(screen.includes(`│        ││${TARGET_ROWS[7]}││        │`))
+  t.ok(screen.includes('PROGRAM'))
+
+  output.columns = 30
+  output.rows = 40
+  output.emit('resize')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes('OUTPUT     TARGET'))
+  t.ok(screen.includes('\r\n\r\nDIFF\r\n'))
+  t.absent(screen.includes('OUTPUT     TARGET     DIFF'))
+
+  output.columns = 21
+  output.rows = 60
+  output.emit('resize')
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.indexOf('OUTPUT') < screen.indexOf('TARGET'))
+  t.ok(screen.indexOf('TARGET') < screen.indexOf('DIFF'))
+  t.ok(screen.split('\r\n').every((line) => line.length <= 20))
+})
+
+test('terminal rejects challenge definitions outside the registry', (t) => {
+  const { input, output } = interactiveStreams()
+
+  try {
+    new Terminal({ input, output, challengeId: 'missing-v1' })
+    t.fail('unknown challenges must not be rendered')
+  } catch (err) {
+    t.is(err.message, 'Unknown challenge: missing-v1')
+  }
+})
+
+test('terminal reevaluates live edits and only submits target matches', async (t) => {
   const { input, output, chunks, rawModes } = interactiveStreams()
   const programs = []
   const terminal = new Terminal({ input, output })
@@ -257,13 +376,15 @@ test('terminal reevaluates live edits and only submits valid programs', async (t
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 1,
-    leaderboard: [
-      {
-        score: 1,
-        author: '91ac72' + '0'.repeat(58),
-        program: 'a'
-      }
-    ]
+    leaderboards: {
+      [CHALLENGE_ID]: [
+        {
+          score: 1,
+          author: '91ac72' + '0'.repeat(58),
+          program: 'a'
+        }
+      ]
+    }
   })
 
   input.write('2')
@@ -274,17 +395,17 @@ test('terminal reevaluates live edits and only submits valid programs', async (t
 
   let screen = plainLatestScreen(chunks)
   t.ok(screen.includes('> a\r\n'))
-  t.ok(screen.includes(Array(8).fill('│····████│').join('\r\n')))
-  t.ok(screen.includes('1 byte · valid'))
-  t.ok(screen.includes('ENTER submit'))
-  t.ok(screen.includes('> a\r\n\r\nENTER submit'))
+  t.ok(screen.includes('│····████│ │····█···│ │·····███│'))
+  t.ok(screen.includes('1 byte · syntax valid · target mismatch'))
+  t.ok(screen.includes('ENTER when matched'))
+  t.ok(screen.includes('> a\r\n\r\nENTER when matched'))
   t.ok(screen.lastIndexOf('OUTPUT') < screen.lastIndexOf('PROGRAM'))
   const redraw = latestScreen(chunks)
   t.absent(redraw.includes('\r'))
   t.absent(redraw.includes('\n'))
   t.absent(redraw.includes('\u001b[2J'))
   t.is(redraw.split('\u001b[2K').length - 1, output.rows)
-  t.ok(redraw.endsWith('\u001b[17;4H'))
+  t.ok(redraw.endsWith('\u001b[18;4H'))
   t.absent(chunks.join('').includes('\u001b[?1049h'))
   t.absent(chunks.join('').includes('\u001b[3J'))
   t.is(chunks.join('').split('\u001b[2J\u001b[H').length - 1, 1)
@@ -322,8 +443,8 @@ test('terminal reevaluates live edits and only submits valid programs', async (t
 
   screen = plainLatestScreen(chunks)
   t.ok(screen.includes('> a!\r\n'))
-  t.ok(screen.includes(Array(8).fill('│████····│').join('\r\n')))
-  t.ok(screen.includes('2 bytes · valid'))
+  t.ok(screen.includes('│████····│ │····█···│ │█████···│'))
+  t.ok(screen.includes('2 bytes · syntax valid · target mismatch'))
 
   input.write('\u001b[D')
   input.write('b')
@@ -332,12 +453,27 @@ test('terminal reevaluates live edits and only submits valid programs', async (t
   await tick()
 
   t.is(terminal.readline.line, 'ab!&')
-  t.ok(plainLatestScreen(chunks).includes('4 bytes · valid'))
+  t.ok(plainLatestScreen(chunks).includes('4 bytes · syntax valid · target mismatch'))
 
   input.write('\r')
   await tick()
 
-  t.alike(programs, ['ab!&'])
+  t.alike(programs, [])
+  t.is(terminal.readline.line, 'ab!&')
+
+  input.write('\x7f\x7f\x7f\x7f')
+  input.write(TARGET_PROGRAM)
+  await tick()
+
+  screen = plainLatestScreen(chunks)
+  t.ok(screen.includes(`${TARGET_PROGRAM.length} bytes · target matched`))
+  t.ok(screen.includes('DIFF · exact match'))
+  t.ok(screen.includes('ENTER submit · Esc menu'))
+
+  input.write('\r')
+  await tick()
+
+  t.alike(programs, [TARGET_PROGRAM])
   t.is(terminal.readline.line, '')
 })
 
@@ -352,15 +488,15 @@ test('interactive editor handles CRLF, printable keys, and history', async (t) =
   await terminal.ready()
   input.write('2')
   await tick()
-  input.write('a\r\n')
+  input.write(`${TARGET_PROGRAM}\r\n`)
   await tick()
 
-  t.alike(programs, ['a'])
+  t.alike(programs, [TARGET_PROGRAM])
   t.is(terminal.readline.line, '')
 
   input.write('\u001b[A')
   await tick()
-  t.is(terminal.readline.line, 'a')
+  t.is(terminal.readline.line, TARGET_PROGRAM)
 
   input.write('\u001b[B')
   input.write('A!')
@@ -397,7 +533,7 @@ test('challenge keeps history navigation and redraws on resize', async (t) => {
   t.teardown(() => terminal.close(), { force: true })
 
   await terminal.ready()
-  input.write('2a\r')
+  input.write(`2${TARGET_PROGRAM}\r`)
   await tick()
 
   t.is(terminal.readline.line, '')
@@ -406,9 +542,9 @@ test('challenge keeps history navigation and redraws on resize', async (t) => {
   await tick()
 
   let screen = plainLatestScreen(chunks)
-  t.is(terminal.readline.line, 'a')
+  t.is(terminal.readline.line, TARGET_PROGRAM)
   t.is(terminal.viewportStart, null)
-  t.ok(screen.includes('> a'))
+  t.ok(screen.includes('DIFF · exact match'))
   t.ok(screen.includes('ENTER submit · Esc menu'))
   t.absent(screen.includes('↑/↓ one row'))
   t.absent(screen.includes('PgUp/PgDn'))
@@ -418,7 +554,7 @@ test('challenge keeps history navigation and redraws on resize', async (t) => {
   input.write('\u001b[5~')
   await tick()
   t.is(chunks.length, beforePageKey)
-  t.is(terminal.readline.line, 'a')
+  t.is(terminal.readline.line, TARGET_PROGRAM)
   t.is(terminal.viewportStart, null)
 
   input.write('\u001b[B')
@@ -436,9 +572,10 @@ test('challenge keeps history navigation and redraws on resize', async (t) => {
 
   screen = plainLatestScreen(chunks)
   t.ok(chunks.length > beforeResize)
-  t.ok(screen.includes('OUTPUT'))
+  t.ok(screen.includes('OUTPUT     TARGET     DIFF'))
   t.ok(screen.includes('PROGRAM'))
-  t.ok(screen.includes('> a\r\n\r\nENTER submit · Esc menu'))
+  t.ok(screen.includes(`${TARGET_PROGRAM.length} bytes · target matched`))
+  t.ok(screen.includes('ENTER submit · Esc menu'))
   t.absent(screen.includes('PgUp/PgDn'))
   t.is(latestScreen(chunks).split('\u001b[2K').length - 1, output.rows)
 })
@@ -452,13 +589,15 @@ test('challenge shows submission feedback without embedding the leaderboard', as
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 1,
-    leaderboard: [
-      {
-        score: 1,
-        author: '91ac72' + '0'.repeat(58),
-        program: 'a'
-      }
-    ]
+    leaderboards: {
+      [CHALLENGE_ID]: [
+        {
+          score: 1,
+          author: '91ac72' + '0'.repeat(58),
+          program: 'a'
+        }
+      ]
+    }
   })
 
   input.write('2')
@@ -474,13 +613,19 @@ test('challenge shows submission feedback without embedding the leaderboard', as
   t.ok(screen.includes('OUTPUT'))
   t.ok(screen.includes('PROGRAM'))
   t.ok(screen.includes('submitting...'))
+  t.ok(screen.includes('ENTER when matched · Esc menu'))
+
+  input.write('a')
+  await tick()
 
   terminal.showSubmission({ valid: true, score: 1 })
   await tick()
 
   screen = plainLatestScreen(chunks)
   t.absent(screen.includes('SCORE   PLAYER       PROGRAM'))
+  t.ok(screen.includes('1 byte · syntax valid · target mismatch'))
   t.ok(screen.includes('✓ submitted · score 1'))
+  t.ok(screen.includes('ENTER when matched · Esc menu'))
 })
 
 test('dedicated leaderboard starts at the top and supports every scroll control', async (t) => {
@@ -500,7 +645,7 @@ test('dedicated leaderboard starts at the top and supports every scroll control'
   terminal.updateState({
     playerKey: '91ac72' + '0'.repeat(58),
     peers: 1,
-    leaderboard
+    leaderboards: { [CHALLENGE_ID]: leaderboard }
   })
 
   input.write('3')
@@ -630,19 +775,9 @@ test('terminal shows invalid edits, supports recovery, and renders checkerboard'
   await tick()
 
   screen = plainLatestScreen(chunks)
-  const checkerboard = [
-    '│·█·█·█·█│',
-    '│█·█·█·█·│',
-    '│·█·█·█·█│',
-    '│█·█·█·█·│',
-    '│·█·█·█·█│',
-    '│█·█·█·█·│',
-    '│·█·█·█·█│',
-    '│█·█·█·█·│'
-  ].join('\r\n')
-
-  t.ok(screen.includes(checkerboard))
-  t.ok(screen.includes('3 bytes · valid'))
+  t.ok(screen.includes('│·█·█·█·█│ │····█···│'))
+  t.ok(screen.includes('│█·█·█·█·│ │···█····│'))
+  t.ok(screen.includes('3 bytes · syntax valid · target mismatch'))
 })
 
 test('terminal restores raw input and exits on ctrl+c without changing screen buffers', async (t) => {

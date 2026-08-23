@@ -101,10 +101,10 @@ function encodeHeads(heads) {
 }
 
 function sameLeaderboards(games) {
-  const expected = JSON.stringify(games[0].state.leaderboard)
+  const expected = JSON.stringify(games[0].state.leaderboards)
 
   for (let i = 1; i < games.length; i++) {
-    if (JSON.stringify(games[i].state.leaderboard) !== expected) return false
+    if (JSON.stringify(games[i].state.leaderboards) !== expected) return false
   }
 
   return true

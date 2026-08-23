@@ -22,8 +22,8 @@ function main(args) {
   console.log('bootstrap:')
   console.log(bootstrapKey.toString('hex'))
   console.log('')
-  console.log('Put this key into:')
-  console.log('workers/game/constants.js')
+  console.log('Use this only for a new, independent game namespace.')
+  console.log('Do not rotate an existing production key during app upgrades.')
 
   return bootstrapKey
 }

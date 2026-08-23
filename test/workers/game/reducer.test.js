@@ -2,94 +2,102 @@
 
 const { test } = require('brittle')
 
-const { createSubmission } = require('../../../workers/game/protocol.js')
+const { TARGET_PROGRAM, targetProgram } = require('../../helpers/programs.js')
+const CHALLENGES = require('../../../workers/game/challenges.js')
+const { bitmapId } = require('../../../workers/game/protocol.js')
 const { reduceEvents } = require('../../../workers/game/reducer.js')
 
 const ALICE = 'a'.repeat(64)
 const BOB = 'b'.repeat(64)
 const CAROL = 'c'.repeat(64)
 const DAVE = 'd'.repeat(64)
+const CHALLENGE_ID = bitmapId(CHALLENGES[0].target)
 
 test('reducer derives one leaderboard row from one submission', (t) => {
-  const state = reduceEvents([accepted(ALICE, 'abc&^')])
+  const state = reduceEvents([accepted(ALICE, TARGET_PROGRAM)])
 
-  t.alike(state.leaderboard, [scored(ALICE, 'abc&^')])
+  t.alike(leaderboard(state), [scored(ALICE, TARGET_PROGRAM)])
 })
 
 test('reducer sorts different scores in ascending order', (t) => {
   const state = reduceEvents([
-    accepted(ALICE, 'a!!!!!!!'),
-    accepted(BOB, 'abc&^'),
-    accepted(CAROL, 'ab&')
+    accepted(ALICE, targetProgram(2)),
+    accepted(BOB, targetProgram(1)),
+    accepted(CAROL, TARGET_PROGRAM)
   ])
 
   t.alike(
-    state.leaderboard.map(({ score, author }) => ({ score, author })),
+    leaderboard(state).map(({ score, author }) => ({ score, author })),
     [
-      { score: 3, author: CAROL },
-      { score: 5, author: BOB },
-      { score: 8, author: ALICE }
+      { score: TARGET_PROGRAM.length, author: CAROL },
+      { score: TARGET_PROGRAM.length + 2, author: BOB },
+      { score: TARGET_PROGRAM.length + 4, author: ALICE }
     ]
   )
 })
 
 test('reducer gives a score to the first event in view order', (t) => {
-  const aliceFirst = reduceEvents([accepted(ALICE, 'abc&^'), accepted(BOB, 'def|&')])
-  const bobFirst = reduceEvents([accepted(BOB, 'def|&'), accepted(ALICE, 'abc&^')])
+  const spaced = ` ${TARGET_PROGRAM} `
+  const aliceFirst = reduceEvents([accepted(ALICE, TARGET_PROGRAM), accepted(BOB, spaced)])
+  const bobFirst = reduceEvents([accepted(BOB, spaced), accepted(ALICE, TARGET_PROGRAM)])
 
-  t.is(aliceFirst.leaderboard.length, 1)
-  t.is(aliceFirst.leaderboard[0].author, ALICE)
-  t.is(bobFirst.leaderboard.length, 1)
-  t.is(bobFirst.leaderboard[0].author, BOB)
+  t.is(leaderboard(aliceFirst).length, 1)
+  t.is(leaderboard(aliceFirst)[0].author, ALICE)
+  t.is(leaderboard(bobFirst).length, 1)
+  t.is(leaderboard(bobFirst)[0].author, BOB)
 })
 
 test('reducer keeps only the first submission for each score', (t) => {
   const state = reduceEvents([
-    accepted(ALICE, 'abc&^'),
-    accepted(BOB, 'def|&'),
-    accepted(CAROL, 'a'),
-    accepted(DAVE, 'a!!!!!!!')
+    accepted(ALICE, targetProgram(1)),
+    accepted(BOB, ` ${targetProgram(1)} `),
+    accepted(CAROL, TARGET_PROGRAM),
+    accepted(DAVE, targetProgram(2))
   ])
 
   t.alike(
-    state.leaderboard.map(({ author, score }) => ({ author, score })),
+    leaderboard(state).map(({ author, score }) => ({ author, score })),
     [
-      { author: CAROL, score: 1 },
-      { author: ALICE, score: 5 },
-      { author: DAVE, score: 8 }
+      { author: CAROL, score: TARGET_PROGRAM.length },
+      { author: ALICE, score: TARGET_PROGRAM.length + 2 },
+      { author: DAVE, score: TARGET_PROGRAM.length + 4 }
     ]
   )
 })
 
 test('reducer ignores invalid accepted events', (t) => {
   const state = reduceEvents([
-    accepted(ALICE, 'a'),
-    { ...accepted(BOB, 'abc&^'), author: 'short' },
-    { ...accepted(CAROL, 'ab&'), score: 3 },
-    { ...accepted(DAVE, 'ab&'), challenge: 'stub-v2' },
+    accepted(ALICE, TARGET_PROGRAM),
+    { ...accepted(BOB, TARGET_PROGRAM), author: 'short' },
+    { ...accepted(CAROL, TARGET_PROGRAM), score: TARGET_PROGRAM.length },
+    { ...accepted(DAVE, TARGET_PROGRAM), challenge: 'stub-v1' },
     null
   ])
 
-  t.alike(state.leaderboard, [scored(ALICE, 'a')])
-  t.alike(reduceEvents(null), { leaderboard: [] })
+  t.alike(leaderboard(state), [scored(ALICE, TARGET_PROGRAM)])
+  t.alike(reduceEvents(null), { leaderboards: { [CHALLENGE_ID]: [] } })
 })
 
-test('reducer independently verifies syntax and derives token scores', (t) => {
+test('reducer independently verifies the target and derives token scores', (t) => {
+  const spaced = ` ${TARGET_PROGRAM} `
   const state = reduceEvents([
-    accepted(ALICE, 'a b &'),
+    accepted(ALICE, spaced),
     accepted(BOB, 'a&'),
-    accepted(CAROL, 'ab'),
-    accepted(DAVE, 'abc&^')
+    accepted(CAROL, 'a'),
+    accepted(DAVE, targetProgram(1))
   ])
 
-  t.alike(state.leaderboard, [scored(ALICE, 'a b &', 3), scored(DAVE, 'abc&^')])
+  t.alike(leaderboard(state), [
+    scored(ALICE, spaced, TARGET_PROGRAM.length),
+    scored(DAVE, targetProgram(1))
+  ])
 })
 
 test('reducer is deterministic and does not mutate its input', (t) => {
   const events = Object.freeze([
-    Object.freeze(accepted(ALICE, 'a!!!!!!!')),
-    Object.freeze(accepted(BOB, 'abc&^')),
-    Object.freeze(accepted(CAROL, 'ab&'))
+    Object.freeze(accepted(ALICE, targetProgram(2))),
+    Object.freeze(accepted(BOB, targetProgram(1))),
+    Object.freeze(accepted(CAROL, TARGET_PROGRAM))
   ])
   const before = events.map((event) => ({ ...event }))
 
@@ -101,10 +109,20 @@ test('reducer is deterministic and does not mutate its input', (t) => {
 })
 
 function accepted(author, program) {
-  return { ...createSubmission(program), author }
+  return {
+    v: 1,
+    type: 'submission',
+    challenge: CHALLENGE_ID,
+    program,
+    author
+  }
 }
 
-function scored(author, program, score = program.length) {
+function leaderboard(state) {
+  return state.leaderboards[CHALLENGE_ID]
+}
+
+function scored(author, program, score = program.replace(/\s/g, '').length) {
   return {
     program,
     author,

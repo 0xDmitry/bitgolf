@@ -1,31 +1,40 @@
 'use strict'
 
-const { isValidAcceptedSubmission } = require('./protocol.js')
-const { verifyProgram } = require('./verifier.js')
+const CHALLENGES = require('./challenges.js')
+const { bitmapId, isValidAcceptedSubmission } = require('./protocol.js')
+const { verifySubmission } = require('./verifier.js')
 
 function reduceEvents(events) {
-  const firstByScore = new Map()
+  const scoresByChallenge = new Map(CHALLENGES.map(({ target }) => [bitmapId(target), new Map()]))
 
-  if (!Array.isArray(events)) return { leaderboard: [] }
+  if (Array.isArray(events)) {
+    for (const event of events) {
+      if (!isValidAcceptedSubmission(event)) continue
 
-  for (const event of events) {
-    if (!isValidAcceptedSubmission(event)) continue
+      const firstByScore = scoresByChallenge.get(event.challenge)
+      if (firstByScore === undefined) continue
 
-    const result = verifyProgram(event.program)
-    if (!result.valid) continue
+      const result = verifySubmission(event)
+      if (!result.valid) continue
 
-    const entry = {
-      program: event.program,
-      author: event.author,
-      score: result.score
+      const entry = {
+        program: event.program,
+        author: event.author,
+        score: result.score
+      }
+
+      if (!firstByScore.has(result.score)) firstByScore.set(result.score, entry)
     }
-
-    if (!firstByScore.has(result.score)) firstByScore.set(result.score, entry)
   }
 
-  const leaderboard = [...firstByScore.values()].sort((a, b) => a.score - b.score)
+  const leaderboards = {}
 
-  return { leaderboard }
+  for (const { target } of CHALLENGES) {
+    const id = bitmapId(target)
+    leaderboards[id] = [...scoresByChallenge.get(id).values()].sort((a, b) => a.score - b.score)
+  }
+
+  return { leaderboards }
 }
 
 module.exports = { reduceEvents }

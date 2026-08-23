@@ -5,7 +5,9 @@ const KeyDecoder = require('bare-ansi-escapes/key-decoder')
 const Readline = require('bare-readline')
 const ReadyResource = require('ready-resource')
 
-const { tokenizeProgram, evaluateBitmap } = require('./workers/game/evaluator.js')
+const CHALLENGES = require('./workers/game/challenges.js')
+const { tokenizeProgram, evaluateAttempt } = require('./workers/game/evaluator.js')
+const { bitmapId } = require('./workers/game/protocol.js')
 
 const PLAYER_PREFIX_LENGTH = 6
 const MAX_DISPLAY_PROGRAM_LENGTH = 64
@@ -17,6 +19,8 @@ const { CSI } = ansiEscapes.constants
 const CLEAR_SCREEN = ansiEscapes.eraseDisplay + CSI + 'H'
 const DISABLE_WRAP = CSI + '?7l'
 const ENABLE_WRAP = CSI + '?7h'
+const CURRENT_CHALLENGE = CHALLENGES[CHALLENGES.length - 1]
+const CURRENT_CHALLENGE_ID = bitmapId(CURRENT_CHALLENGE.target)
 const MENU_ITEMS = [
   { label: 'Start tutorial', view: 'tutorial' },
   { label: 'Solve challenge', view: 'challenge' },
@@ -50,27 +54,32 @@ const TUTORIAL_PAGES = [
   {
     title: 'Valid programs and scoring',
     lines: [
-      'A valid program never underflows and ends with one stack value.',
+      'A complete program never underflows and ends with one stack value.',
       '',
       'Whitespace is ignored. Every language token costs one byte.',
-      'Any valid image can be submitted; lower scores are better.',
+      'Only programs that draw the target can be submitted; lower scores are better.',
       '',
-      'The live preview updates after every edit.'
+      'The live preview and diff update after every edit.'
     ]
   }
 ]
 
 module.exports = class Terminal extends ReadyResource {
-  constructor({ input, output }) {
+  constructor({ input, output, challengeId = CURRENT_CHALLENGE_ID }) {
     super()
+
+    const challenge = CHALLENGES.find(({ target }) => bitmapId(target) === challengeId)
+    if (challenge === undefined) throw new TypeError(`Unknown challenge: ${challengeId}`)
 
     this.input = input
     this.output = output
+    this.challenge = challenge
+    this.challengeId = bitmapId(challenge.target)
     this.interactive = input.isTTY === true && output.isTTY === true
     this.readline = null
     this.state = null
     this.feedback = null
-    this.editor = editorState('', 0)
+    this.editor = editorState('', 0, this.challenge)
     this.restored = false
     this.viewportStart = null
     this.view = this.interactive ? 'menu' : 'combined'
@@ -143,11 +152,15 @@ module.exports = class Terminal extends ReadyResource {
   }
 
   showSubmission(result) {
+    if (result.challenge !== undefined && result.challenge !== this.challengeId) return
+
     this.feedback = result.valid ? { type: 'valid', score: result.score } : { type: 'invalid' }
     this._render()
   }
 
-  showSubmitting() {
+  showSubmitting(challengeId = this.challengeId) {
+    if (challengeId !== this.challengeId) return
+
     this.feedback = { type: 'submitting' }
     this._render()
   }
@@ -168,6 +181,7 @@ module.exports = class Terminal extends ReadyResource {
       state: this.state,
       feedback: this.feedback,
       editor: this.editor,
+      challenge: this.challenge,
       columns: this.output.columns || DEFAULT_COLUMNS,
       menuIndex: this.menuIndex,
       tutorialPage: this.tutorialPage
@@ -223,7 +237,7 @@ module.exports = class Terminal extends ReadyResource {
 
     if (program !== this.editor.program) {
       this.feedback = null
-      this.editor = editorState(program, cursor)
+      this.editor = editorState(program, cursor, this.challenge)
     } else {
       this.editor.cursor = cursor
     }
@@ -232,7 +246,7 @@ module.exports = class Terminal extends ReadyResource {
   }
 
   _canSubmit(program) {
-    const evaluation = evaluateBitmap(program)
+    const evaluation = evaluateAttempt(program, this.challenge)
 
     this.editor = {
       program,
@@ -240,23 +254,25 @@ module.exports = class Terminal extends ReadyResource {
       evaluation
     }
 
-    return evaluation.valid
+    return evaluation.matches
   }
 
   _onLine(program) {
     this.viewportStart = null
 
-    const evaluation = evaluateBitmap(program)
+    const evaluation = evaluateAttempt(program, this.challenge)
 
-    if (!evaluation.valid) {
+    if (!evaluation.matches) {
       this.editor = { program, cursor: program.length, evaluation }
       this._render()
       return
     }
 
     this.feedback = null
-    this.editor = editorState('', 0)
-    this.emit('submit', program)
+    this.editor = this.interactive
+      ? editorState('', 0, this.challenge)
+      : { program, cursor: program.length, evaluation }
+    this.emit('submit', program, this.challengeId)
     this._render()
   }
 
@@ -560,16 +576,27 @@ function isPrintableKey(key) {
   return key.sequence.length > 0
 }
 
-function editorState(program, cursor) {
-  return { program, cursor, evaluation: evaluateBitmap(program) }
+function editorState(program, cursor, challenge) {
+  return { program, cursor, evaluation: evaluateAttempt(program, challenge) }
 }
 
-function formatScreen({ view, state, feedback, editor, columns, menuIndex, tutorialPage }) {
+function formatScreen({
+  view,
+  state,
+  feedback,
+  editor,
+  challenge,
+  columns,
+  menuIndex,
+  tutorialPage
+}) {
   if (view === 'menu') return formatMenuScreen(state, feedback, menuIndex)
   if (view === 'tutorial') return formatTutorialScreen(state, feedback, tutorialPage)
-  if (view === 'challenge') return formatChallengeScreen(state, feedback, editor, columns)
-  if (view === 'leaderboard') return formatLeaderboardScreen(state, feedback)
-  return formatCombinedScreen(state, feedback, editor, columns)
+  if (view === 'challenge') {
+    return formatChallengeScreen(state, feedback, editor, challenge, columns)
+  }
+  if (view === 'leaderboard') return formatLeaderboardScreen(state, feedback, challenge)
+  return formatCombinedScreen(state, feedback, editor, challenge, columns)
 }
 
 function formatMenuScreen(state, feedback, menuIndex) {
@@ -622,29 +649,23 @@ function formatTutorialScreen(state, feedback, tutorialPage) {
   }
 }
 
-function formatChallengeScreen(state, feedback, editor, columns) {
+function formatChallengeScreen(state, feedback, editor, challenge, columns) {
   const input = formatEditorInput(editor.program, editor.cursor, columns)
   const lines = ['', formatConnection(state), '']
+  const { diff, matches } = editor.evaluation
 
-  lines.push(
-    'OUTPUT',
-    ...formatBitmap(editor.evaluation.bitmap),
-    formatEvaluation(editor.evaluation)
-  )
+  lines.push(...formatChallengeBitmaps(editor.evaluation.bitmap, challenge.target, diff, columns))
+  lines.push(formatEvaluation(editor.evaluation, matches), formatDiff(diff))
 
   if (editor.evaluation.error) lines.push(`error: ${editor.evaluation.error}`)
+  if (feedback !== null) lines.push(formatFeedback(feedback).join(' · '))
 
   lines.push('PROGRAM')
 
   const editorRow = lines.length
   lines.push(`> ${input.program}`)
 
-  const action =
-    feedback === null
-      ? editor.evaluation.valid
-        ? 'ENTER submit'
-        : 'ENTER when valid'
-      : formatFeedback(feedback).join(' · ')
+  const action = matches ? 'ENTER submit' : 'ENTER when matched'
 
   return {
     lines,
@@ -656,8 +677,8 @@ function formatChallengeScreen(state, feedback, editor, columns) {
   }
 }
 
-function formatLeaderboardScreen(state, feedback) {
-  const leaderboard = state === null ? [] : state.leaderboard
+function formatLeaderboardScreen(state, feedback, challenge) {
+  const leaderboard = challengeLeaderboard(state, bitmapId(challenge.target))
   const lines = [
     '',
     formatConnection(state),
@@ -678,19 +699,25 @@ function formatLeaderboardScreen(state, feedback) {
   }
 }
 
-function formatCombinedScreen(state, feedback, editor, columns) {
+function formatCombinedScreen(state, feedback, editor, challenge, columns) {
   const lines = []
+  const { diff, matches } = editor.evaluation
 
   if (state === null) {
     lines.push('', 'connecting...')
   } else {
     lines.push('', formatConnection(state), '')
-    lines.push(...formatLeaderboard(state.leaderboard, state.playerKey))
+    lines.push(
+      ...formatLeaderboard(challengeLeaderboard(state, bitmapId(challenge.target)), state.playerKey)
+    )
   }
 
   const input = formatEditorInput(editor.program, editor.cursor, columns)
-  lines.push('', 'OUTPUT', '', ...formatBitmap(editor.evaluation.bitmap))
-  lines.push('', formatEvaluation(editor.evaluation))
+  lines.push(
+    '',
+    ...formatChallengeBitmaps(editor.evaluation.bitmap, challenge.target, diff, columns)
+  )
+  lines.push(formatEvaluation(editor.evaluation, matches), formatDiff(diff))
 
   if (editor.evaluation.error) lines.push(`error: ${editor.evaluation.error}`)
 
@@ -701,9 +728,7 @@ function formatCombinedScreen(state, feedback, editor, columns) {
   lines.push(
     '',
     feedback === null
-      ? editor.evaluation.valid
-        ? 'ENTER submit'
-        : 'ENTER when valid'
+      ? 'target-matching lines submit automatically'
       : formatFeedback(feedback).join(' · ')
   )
 
@@ -741,6 +766,19 @@ function formatConnection(state) {
 
   const peers = `${state.peers} ${state.peers === 1 ? 'peer' : 'peers'}`
   return `connected · ${peers}`
+}
+
+function challengeLeaderboard(state, challengeId) {
+  if (
+    state === null ||
+    state.leaderboards === null ||
+    typeof state.leaderboards !== 'object' ||
+    !Array.isArray(state.leaderboards[challengeId])
+  ) {
+    return []
+  }
+
+  return state.leaderboards[challengeId]
 }
 
 function formatNotice(feedback) {
@@ -874,12 +912,77 @@ function formatBitmap(bitmap) {
   return lines
 }
 
-function formatEvaluation(evaluation) {
+function formatChallengeBitmaps(output, target, diff, columns) {
+  const panels = [
+    { label: 'OUTPUT', bitmap: output },
+    { label: 'TARGET', bitmap: target },
+    { label: 'DIFF', bitmap: diff }
+  ]
+  const panelGap = ' '
+
+  if (columns >= 33) return formatBitmapRow(panels, panelGap)
+  if (columns >= 31) return formatBitmapRow(panels, '')
+
+  if (columns >= 22) {
+    return [
+      ...formatBitmapRow(panels.slice(0, 2), panelGap),
+      '',
+      ...formatBitmapRow(panels.slice(2), panelGap)
+    ]
+  }
+
+  if (columns >= 21) {
+    return [...formatBitmapRow(panels.slice(0, 2), ''), '', ...formatBitmapRow(panels.slice(2), '')]
+  }
+
+  const lines = []
+
+  for (const panel of panels) {
+    if (lines.length > 0) lines.push('')
+    lines.push(...formatBitmapRow([panel], panelGap))
+  }
+
+  return lines
+}
+
+function formatBitmapRow(panels, gap) {
+  const bitmaps = panels.map((panel) => formatBitmap(panel.bitmap))
+  const lines = [
+    panels
+      .map((panel) => panel.label.padEnd(10))
+      .join(gap)
+      .trimEnd()
+  ]
+
+  for (let row = 0; row < bitmaps[0].length; row++) {
+    lines.push(bitmaps.map((bitmap) => bitmap[row]).join(gap))
+  }
+
+  return lines
+}
+
+function formatDiff(diff) {
+  if (diff === null) return 'DIFF · unavailable until output can be evaluated'
+
+  let mismatches = 0
+  for (const row of diff) for (const pixel of row) if (pixel) mismatches++
+
+  if (mismatches === 0) return 'DIFF · exact match'
+  return `DIFF · ${mismatches} ${mismatches === 1 ? 'mismatch' : 'mismatches'} · █ marks a mismatch`
+}
+
+function formatEvaluation(evaluation, matched = null) {
   const bytes = `${evaluation.size} ${evaluation.size === 1 ? 'byte' : 'bytes'}`
 
-  if (evaluation.status === 'valid') return `${bytes} · valid`
+  if (evaluation.status === 'valid') {
+    if (matched === true) return `${bytes} · target matched`
+    if (matched === false) return `${bytes} · syntax valid · target mismatch`
+    return `${bytes} · valid`
+  }
   if (evaluation.status === 'invalid') return `${bytes} · invalid`
-  if (evaluation.stackDepth > 0) return `${bytes} · stack ${evaluation.stackDepth} · incomplete`
+  if (evaluation.stackDepth > 0) {
+    return `${bytes} · stack ${evaluation.stackDepth} · incomplete · top preview`
+  }
   return `${bytes} · incomplete`
 }
 

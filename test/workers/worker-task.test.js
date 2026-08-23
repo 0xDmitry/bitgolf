@@ -1,8 +1,13 @@
 const { test } = require('brittle')
 const ReadyResource = require('ready-resource')
 
+const { TARGET_PROGRAM } = require('../helpers/programs.js')
+const CHALLENGES = require('../../workers/game/challenges.js')
 const { MAX_PROGRAM_LENGTH } = require('../../workers/game/constants.js')
+const { bitmapId } = require('../../workers/game/protocol.js')
 const WorkerTask = require('../../workers/worker-task.js')
+
+const CHALLENGE_ID = bitmapId(CHALLENGES[0].target)
 
 class TestPipe extends ReadyResource {
   constructor() {
@@ -28,7 +33,7 @@ test('game task announces readiness and its initial state', async (t) => {
     type: 'game:state',
     playerKey: pipe.messages[1].playerKey,
     peers: 0,
-    leaderboard: []
+    leaderboards: { [CHALLENGE_ID]: [] }
   })
   t.ok(/^[0-9a-f]{64}$/.test(pipe.messages[1].playerKey))
 })
@@ -57,7 +62,12 @@ test('game task accepts a submission and returns its derived score', async (t) =
 
   pipe.emit(
     'data',
-    JSON.stringify({ type: 'game:submit', requestId: 'submission-1', program: 'abc&^' })
+    JSON.stringify({
+      type: 'game:submit',
+      requestId: 'submission-1',
+      challenge: CHALLENGE_ID,
+      program: TARGET_PROGRAM
+    })
   )
   await game.commandQueue
 
@@ -68,15 +78,17 @@ test('game task accepts a submission and returns its derived score', async (t) =
     type: 'game:submit-result',
     requestId: 'submission-1',
     valid: true,
-    score: 5
+    score: TARGET_PROGRAM.length,
+    challenge: CHALLENGE_ID
   })
-  t.is(state.leaderboard.length, 1)
-  t.is(state.leaderboard[0].score, 5)
-  t.is(state.leaderboard[0].program, 'abc&^')
-  t.is(state.leaderboard[0].author, playerKey)
+  const leaderboard = state.leaderboards[CHALLENGE_ID]
+  t.is(leaderboard.length, 1)
+  t.is(leaderboard[0].score, TARGET_PROGRAM.length)
+  t.is(leaderboard[0].program, TARGET_PROGRAM)
+  t.is(leaderboard[0].author, playerKey)
 })
 
-test('game task rejects empty, malformed, and oversized programs', async (t) => {
+test('game task rejects empty, non-target, malformed, and oversized programs', async (t) => {
   const pipe = new TestPipe()
   const game = new WorkerTask(pipe, await t.tmp(), { network: false })
   t.teardown(() => game.close(), { force: true })
@@ -85,6 +97,7 @@ test('game task rejects empty, malformed, and oversized programs', async (t) => 
   pipe.messages.length = 0
 
   pipe.emit('data', JSON.stringify({ type: 'game:submit', requestId: 'empty', program: '' }))
+  pipe.emit('data', JSON.stringify({ type: 'game:submit', requestId: 'wrong', program: 'a' }))
   pipe.emit(
     'data',
     JSON.stringify({ type: 'game:submit', requestId: 'unsupported', program: 'hello' })
@@ -93,22 +106,33 @@ test('game task rejects empty, malformed, and oversized programs', async (t) => 
     'data',
     JSON.stringify({
       type: 'game:submit',
+      requestId: 'unknown-challenge',
+      challenge: 'missing-v1',
+      program: TARGET_PROGRAM
+    })
+  )
+  pipe.emit(
+    'data',
+    JSON.stringify({
+      type: 'game:submit',
       requestId: 'oversized',
-      program: `a${'!'.repeat(MAX_PROGRAM_LENGTH)}`
+      program: `${TARGET_PROGRAM}${'!'.repeat(MAX_PROGRAM_LENGTH)}`
     })
   )
   await game.commandQueue
 
   const results = pipe.messages.filter((message) => message.type === 'game:submit-result')
   t.alike(
-    results.map(({ requestId, valid }) => ({ requestId, valid })),
+    results.map(({ requestId, valid, challenge }) => ({ requestId, valid, challenge })),
     [
-      { requestId: 'empty', valid: false },
-      { requestId: 'unsupported', valid: false },
-      { requestId: 'oversized', valid: false }
+      { requestId: 'empty', valid: false, challenge: CHALLENGE_ID },
+      { requestId: 'wrong', valid: false, challenge: CHALLENGE_ID },
+      { requestId: 'unsupported', valid: false, challenge: CHALLENGE_ID },
+      { requestId: 'unknown-challenge', valid: false, challenge: 'missing-v1' },
+      { requestId: 'oversized', valid: false, challenge: CHALLENGE_ID }
     ]
   )
-  t.is(game.game.state.leaderboard.length, 0)
+  t.is(game.game.state.leaderboards[CHALLENGE_ID].length, 0)
   t.absent(game.game.state.submissions)
 })
 

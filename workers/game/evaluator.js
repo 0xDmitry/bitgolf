@@ -5,8 +5,12 @@ const { MAX_PROGRAM_LENGTH } = require('./constants.js')
 const VARIABLES = new Set(['a', 'b', 'c', 'd', 'e', 'f'])
 const BINARY_OPERATORS = new Set(['&', '|', '^'])
 const LANGUAGE_TOKENS = new Set([...VARIABLES, '!', ...BINARY_OPERATORS])
+// Append evaluators when rules change. Never rewrite a deployed rule implementation.
+const ATTEMPT_EVALUATORS = Object.freeze({
+  1: evaluateAttemptV1
+})
 
-function tokenizeProgram(program) {
+function tokenizeProgramV1(program) {
   if (typeof program !== 'string') {
     return {
       ok: false,
@@ -45,11 +49,7 @@ function tokenizeProgram(program) {
   return { ok: true, tokens, size: tokens.length }
 }
 
-function evaluateProgram(program) {
-  return inspectProgram(program).result
-}
-
-function evaluateBitmap(program) {
+function evaluateBitmapV1(program) {
   const { result, tokens } = inspectProgram(program)
 
   if (result.status === 'invalid' || result.stackDepth === 0) {
@@ -67,8 +67,54 @@ function evaluateBitmap(program) {
   return { ...result, bitmap }
 }
 
+function evaluateAttempt(program, challenge) {
+  const evaluator = ATTEMPT_EVALUATORS[challenge?.rulesVersion]
+  if (typeof evaluator !== 'function') {
+    throw new TypeError(`Unsupported challenge rules: ${challenge?.rulesVersion}`)
+  }
+
+  return evaluator(program, challenge)
+}
+
+function evaluateAttemptV1(program, challenge) {
+  const evaluation = evaluateBitmapV1(program)
+  const target = challenge.target
+  const diff = diffBitmaps(evaluation.bitmap, target)
+  let matches = evaluation.valid && diff !== null
+
+  if (matches) {
+    for (const row of diff) {
+      if (row.includes(true)) {
+        matches = false
+        break
+      }
+    }
+  }
+
+  return { ...evaluation, matches, diff }
+}
+
+function diffBitmaps(actual, expected) {
+  if (!isBitmap(actual) || !isBitmap(expected)) return null
+
+  return actual.map((row, y) => row.map((pixel, x) => pixel !== expected[y][x]))
+}
+
+function isBitmap(bitmap) {
+  if (!Array.isArray(bitmap) || bitmap.length !== 8) return false
+
+  for (const row of bitmap) {
+    if (!Array.isArray(row) || row.length !== 8) return false
+    for (const pixel of row) {
+      if (typeof pixel !== 'boolean') return false
+    }
+  }
+
+  return true
+}
+
 function inspectProgram(program) {
-  const tokenized = tokenizeProgram(program)
+  const tokenized = tokenizeProgramV1(program)
 
   if (!tokenized.ok) {
     return {
@@ -165,7 +211,7 @@ function variableValue(variable, x, y) {
 }
 
 module.exports = {
-  tokenizeProgram,
-  evaluateProgram,
-  evaluateBitmap
+  tokenizeProgram: tokenizeProgramV1,
+  evaluateBitmap: evaluateBitmapV1,
+  evaluateAttempt
 }

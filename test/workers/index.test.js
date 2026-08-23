@@ -1,6 +1,11 @@
 const { test } = require('brittle')
 
 const App = require('../../app.js')
+const { TARGET_PROGRAM } = require('../helpers/programs.js')
+const CHALLENGES = require('../../workers/game/challenges.js')
+const { bitmapId } = require('../../workers/game/protocol.js')
+
+const CHALLENGE_ID = bitmapId(CHALLENGES[0].target)
 
 class GameOnlyApp extends App {
   _openUpdater() {}
@@ -30,12 +35,18 @@ test('app waits for the game worker and supports a framed IPC round trip', async
   app.sendGame({ type: 'game:ping', requestId: 'round-trip' })
   t.alike(await pong, { type: 'game:pong', requestId: 'round-trip' })
 
-  app.sendGame({ type: 'game:submit', requestId: 'submission', program: 'abc&^' })
+  app.sendGame({
+    type: 'game:submit',
+    requestId: 'submission',
+    challenge: CHALLENGE_ID,
+    program: TARGET_PROGRAM
+  })
   t.alike(await submission, {
     type: 'game:submit-result',
     requestId: 'submission',
     valid: true,
-    score: 5
+    score: TARGET_PROGRAM.length,
+    challenge: CHALLENGE_ID
   })
 
   await app.close()
