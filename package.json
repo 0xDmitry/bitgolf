@@ -1,6 +1,6 @@
 {
   "name": "bitgolf",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "A global peer-to-peer code-golf game for your terminal",
   "private": true,
   "bin": "bin.mjs",
