@@ -30,7 +30,7 @@ test('app waits for the game worker and supports a framed IPC round trip', async
   app.sendGame({ type: 'game:ping', requestId: 'round-trip' })
   t.alike(await pong, { type: 'game:pong', requestId: 'round-trip' })
 
-  app.sendGame({ type: 'game:submit', requestId: 'submission', program: 'hello' })
+  app.sendGame({ type: 'game:submit', requestId: 'submission', program: 'abc&^' })
   t.alike(await submission, {
     type: 'game:submit-result',
     requestId: 'submission',

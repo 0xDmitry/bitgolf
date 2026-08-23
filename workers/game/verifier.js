@@ -1,12 +1,13 @@
 'use strict'
 
-function verifyProgram(program) {
-  if (typeof program !== 'string') return { valid: false, score: 0 }
+const { evaluateProgram } = require('./evaluator.js')
 
-  return {
-    valid: program.length > 0,
-    score: program.length
-  }
+function verifyProgram(program) {
+  const result = evaluateProgram(program)
+
+  if (!result.valid) return { valid: false, score: 0 }
+
+  return { valid: true, score: result.size }
 }
 
 module.exports = { verifyProgram }

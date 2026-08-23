@@ -26,9 +26,27 @@ npm start
 npm start -- --storage /tmp/bitgolf-dev
 ```
 
+## Navigation
+
+An interactive terminal opens on a short description and three choices: **Start tutorial**, **Solve challenge**, and **Leaderboard**. Use the arrow keys and Enter, or press `1`, `2`, or `3` as a shortcut. Escape returns to the menu without discarding the current program.
+
+The tutorial introduces coordinate bits, postfix operators, and scoring. In the challenge, Up/Down recalls program history. Only the dedicated leaderboard scrolls: Up/Down moves one row, Page Up/Page Down moves one screen, and Home/End jumps to the top or bottom. Interactive screens redraw automatically when the terminal is resized. Ctrl+C exits from any screen.
+
+Piped input skips the menu, so scripts can continue to submit one program per line.
+
 ## Game rules
 
-A submission is a non-empty program string. The MVP verifier is intentionally a stub: it accepts every non-empty string and scores it with `program.length`. Programs are stored as data and are never executed.
+A submission is a complete Bit Golf program. Bit Golf is a postfix Boolean stack language with ten one-character tokens:
+
+```text
+a b c d e f ! & | ^
+```
+
+The variables push coordinate bits for each pixel in an 8×8 bitmap: `abc` are the three bits of `x`, and `def` are the three bits of `y`. `!` negates the top stack value; `&`, `|`, and `^` pop two values and push their Boolean result. A complete program never underflows and ends with exactly one stack value. There is no target bitmap yet, so every syntactically complete program is submit-ready.
+
+The terminal evaluates the current input after every edit and renders its bitmap with `█` and `·`. Incomplete programs are labeled calmly and, when possible, preview the top stack value. Enter submits only complete programs; Backspace, left/right arrows, and Ctrl+C retain their usual terminal behavior.
+
+Scores are language-token counts. Whitespace is ignored, so `a b &` has score 3, although the exact submitted text remains in the event log. Programs are stored as data and are never evaluated as JavaScript.
 
 The leaderboard has one row per score. The first valid submission encountered in the current Autobase event ordering owns that score. Later submissions with the same score remain in the Autobase event history but do not replace that row. If Autobase later reorders concurrent events, the pure reducer recomputes ownership from the new order.
 
@@ -39,20 +57,23 @@ Submitted protocol events have exactly these fields:
   v: 1,
   type: 'submission',
   challenge: 'stub-v1',
-  program: 'hello'
+  program: 'ab&'
 }
 ```
 
-Every peer validates the event and derives both the score and authenticated author. The author is the full hexadecimal Autobase writer key from `node.from.key`; a short prefix is used only for display.
+Every peer validates the event and derives both the score and authenticated author. The author is the full hexadecimal Autobase writer key from `node.from.key`. Local leaderboard entries are labeled `YOU`; other players are represented by a short key prefix. The local writer key is never printed in the UI.
 
 Protocol bounds are enforced before an optimistic writer is acknowledged:
 
 - protocol version, type, challenge, and exact field set must match;
-- `program` must be a non-empty string no longer than 4,096 characters;
+- `program` must be a non-empty string and pass the shared Bit Golf evaluator;
+- program source may contain at most 4,096 characters (whitespace counts toward this resource limit, but not toward score);
 - an encoded event may be at most 32 KiB;
 - accepted authors must be full 64-character hexadecimal writer keys.
 
 Malformed, unsupported, oversized, or unverifiable events are ignored.
+
+This release intentionally keeps protocol `v: 1`, challenge `stub-v1`, and the existing global Autobase namespace. Because the verifier semantics changed under that protocol identifier, old and new binaries can derive different views while they coexist; deployments should update peers together. A future mixed-version rollout needs an explicit protocol or namespace migration.
 
 ## Architecture
 
@@ -71,6 +92,7 @@ workers/game/
    |-- Corestore               persistent local identity and data
    |-- Autobase 7.28.1         deterministic multiwriter ordering
    |-- Hyperswarm              peer discovery and replication
+   |-- pure evaluator          syntax, token score, and 8×8 bitmap
    |-- events Hypercore view   accepted ordered submissions
    `-- pure reducer            leaderboard
 ```
@@ -133,7 +155,7 @@ Terminal B:
 npm start -- --storage /tmp/bitgolf-b
 ```
 
-Both processes use separate local identities while joining the same global game. Enter `hello` in either terminal and both peers should eventually show its score-5 row. Enter `x` in the other terminal and both should show score 1. For two score-5 programs, whichever submission appears first in the current Autobase event view owns that row.
+Both processes use separate local identities while joining the same global game. Enter `cf^` in either terminal to preview and submit a checkerboard; both peers should eventually show its score-3 row. Enter `a` in the other terminal and both should show score 1. For two programs with the same score, whichever submission appears first in the current Autobase event view owns that row.
 
 ## Persistence
 
@@ -150,7 +172,7 @@ npm test
 npm run lint
 ```
 
-The suite covers protocol validation, the stub verifier, deterministic reduction and tie semantics, worker IPC, persistence, direct in-process Autobase replication, repeated optimistic non-member submissions, and convergence after concurrent writes. Automated replication tests connect peers directly and do not depend on the public DHT.
+The suite covers exact evaluator masks, stack and operator semantics, token scoring and limits, protocol validation, distributed verification, deterministic reduction and tie semantics, live terminal editing, worker IPC, persistence, direct in-process Autobase replication, repeated optimistic non-member submissions, and convergence after concurrent writes. Automated replication tests connect peers directly and do not depend on the public DHT.
 
 ## Main files
 
@@ -160,7 +182,8 @@ The suite covers protocol validation, the stub verifier, deterministic reduction
 - `workers/worker-task.js` — game IPC commands and state events
 - `workers/game/index.js` — game lifecycle, Autobase event view, and derived state
 - `workers/game/network.js` — Hyperswarm discovery, replication, and peer count
+- `workers/game/evaluator.js` — pure tokenization, stack evaluation, and bitmap generation
 - `workers/game/protocol.js` — event creation, validation, encoding, and bounds
-- `workers/game/verifier.js` — replaceable MVP verifier
+- `workers/game/verifier.js` — complete-program validation and token-derived scoring
 - `workers/game/reducer.js` — pure ordered-events-to-leaderboard reduction
 - `scripts/generate-bootstrap-key.js` — one-time unowned bootstrap-key generator

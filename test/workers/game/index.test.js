@@ -11,18 +11,18 @@ test('Game peers replicate submissions and derive the same leaderboard', async (
   const bob = await createTestGame(t, { bootstrapKey: alice.base.key })
 
   await replicateAndSync([alice, bob])
-  await alice.submit('hello')
+  await alice.submit('abc&^')
   await replicateAndSync([alice, bob])
 
   t.alike(alice.state.leaderboard, bob.state.leaderboard)
-  t.alike(alice.state.leaderboard, [{ program: 'hello', author: alice.state.playerKey, score: 5 }])
+  t.alike(alice.state.leaderboard, [{ program: 'abc&^', author: alice.state.playerKey, score: 5 }])
 
-  await bob.submit('x')
+  await bob.submit('a')
   await replicateAndSync([alice, bob])
 
   const expected = [
-    { program: 'x', author: bob.state.playerKey, score: 1 },
-    { program: 'hello', author: alice.state.playerKey, score: 5 }
+    { program: 'a', author: bob.state.playerKey, score: 1 },
+    { program: 'abc&^', author: alice.state.playerKey, score: 5 }
   ]
 
   t.alike(alice.state.leaderboard, expected)
@@ -31,12 +31,64 @@ test('Game peers replicate submissions and derive the same leaderboard', async (
 
 test('Game ignores decoded submissions that fail validation', async (t) => {
   const game = await createTestGame(t)
-  const invalid = { ...createSubmission('x'), type: 'move' }
+  const invalid = { ...createSubmission('a'), type: 'move' }
 
   await game.base.append(Buffer.from(JSON.stringify(invalid)), { optimistic: true })
   await game.refresh()
 
   t.alike(game.state.leaderboard, [])
+})
+
+test('Game accepts complete Bit Golf programs and rejects malformed syntax', async (t) => {
+  const game = await createTestGame(t)
+
+  for (const [program, score] of [
+    ['a', 1],
+    ['ab&', 3],
+    ['cf^', 3]
+  ]) {
+    t.alike(await game.submit(program), { valid: true, score })
+  }
+
+  for (const program of ['', '&', 'a&', 'ab', 'c^f', 'hello']) {
+    t.alike(await game.submit(program), { valid: false, score: 0 })
+  }
+
+  t.alike(
+    game.state.leaderboard.map(({ program, score }) => ({ program, score })),
+    [
+      { program: 'a', score: 1 },
+      { program: 'ab&', score: 3 }
+    ]
+  )
+})
+
+test('replicated peers independently reject syntax and derive token scores', async (t) => {
+  const alice = await createTestGame(t)
+  const bob = await createTestGame(t, { bootstrapKey: alice.base.key })
+
+  await replicateAndSync([alice, bob])
+
+  for (const program of ['&', 'a&', 'ab', 'c^f', 'hello']) {
+    await alice.base.append(encodeSubmission(createSubmission(program)), { optimistic: true })
+  }
+  await replicateAndSync([alice, bob])
+
+  t.alike(await alice._readEvents(), [])
+  t.alike(await bob._readEvents(), [])
+  t.alike(alice.state.leaderboard, [])
+  t.alike(bob.state.leaderboard, [])
+
+  const program = 'a b &'
+  await alice.base.append(encodeSubmission(createSubmission(program)), { optimistic: true })
+  await replicateAndSync([alice, bob])
+
+  const accepted = { ...createSubmission(program), author: alice.state.playerKey }
+  const expected = [{ program, author: alice.state.playerKey, score: 3 }]
+  t.alike(await alice._readEvents(), [accepted])
+  t.alike(await bob._readEvents(), [accepted])
+  t.alike(alice.state.leaderboard, expected)
+  t.alike(bob.state.leaderboard, expected)
 })
 
 test('a non-member writer can make repeated accepted optimistic submissions', async (t) => {
@@ -47,26 +99,26 @@ test('a non-member writer can make repeated accepted optimistic submissions', as
   t.absent(bob.base.writable)
 
   try {
-    await bob.base.append(encodeSubmission(createSubmission('ordinary')))
+    await bob.base.append(encodeSubmission(createSubmission('ab&')))
     t.fail('a non-member ordinary append must be rejected')
   } catch (err) {
     t.is(err.message, 'Not writable')
   }
 
-  await bob.submit('hello')
+  await bob.submit('abc&^')
   await replicateAndSync([alice, bob])
 
-  let expected = [{ program: 'hello', author: bob.state.playerKey, score: 5 }]
+  let expected = [{ program: 'abc&^', author: bob.state.playerKey, score: 5 }]
   t.alike(alice.state.leaderboard, expected)
   t.alike(bob.state.leaderboard, expected)
   t.absent(bob.base.writable)
 
-  await bob.submit('x')
+  await bob.submit('a')
   await replicateAndSync([alice, bob])
 
   expected = [
-    { program: 'x', author: bob.state.playerKey, score: 1 },
-    { program: 'hello', author: bob.state.playerKey, score: 5 }
+    { program: 'a', author: bob.state.playerKey, score: 1 },
+    { program: 'abc&^', author: bob.state.playerKey, score: 5 }
   ]
   t.alike(alice.state.leaderboard, expected)
   t.alike(bob.state.leaderboard, expected)
@@ -82,14 +134,14 @@ test('two non-members synchronize through an unowned bootstrap key', async (t) =
   t.absent(bob.base.writable)
 
   await replicateAndSync([alice, bob])
-  await alice.submit('hello')
+  await alice.submit('abc&^')
   await replicateAndSync([alice, bob])
-  await bob.submit('x')
+  await bob.submit('a')
   await replicateAndSync([alice, bob])
 
   const expected = [
-    { program: 'x', author: bob.state.playerKey, score: 1 },
-    { program: 'hello', author: alice.state.playerKey, score: 5 }
+    { program: 'a', author: bob.state.playerKey, score: 1 },
+    { program: 'abc&^', author: alice.state.playerKey, score: 5 }
   ]
   t.alike(alice.state.leaderboard, expected)
   t.alike(bob.state.leaderboard, expected)
@@ -102,12 +154,12 @@ test('disconnected concurrent submissions converge', async (t) => {
 
   await replicateAndSync([alice, bob])
 
-  await Promise.all([alice.submit('hello'), bob.submit('x')])
+  await Promise.all([alice.submit('abc&^'), bob.submit('a')])
   await replicateAndSync([alice, bob])
 
   const expected = [
-    { program: 'x', author: bob.state.playerKey, score: 1 },
-    { program: 'hello', author: alice.state.playerKey, score: 5 }
+    { program: 'a', author: bob.state.playerKey, score: 1 },
+    { program: 'abc&^', author: alice.state.playerKey, score: 5 }
   ]
   t.alike(alice.state.leaderboard, expected)
   t.alike(bob.state.leaderboard, expected)
@@ -120,9 +172,9 @@ test('persistent storage retains local identity and leaderboard', async (t) => {
   const bob = await createTestGame(t, { storage: bobStorage, bootstrapKey })
 
   await replicateAndSync([alice, bob])
-  await alice.submit('hello')
+  await alice.submit('abc&^')
   await replicateAndSync([alice, bob])
-  await bob.submit('x')
+  await bob.submit('a')
   await replicateAndSync([alice, bob])
 
   const playerKey = bob.state.playerKey
@@ -141,7 +193,7 @@ test('changing the bootstrap key isolates persisted game state', async (t) => {
   const firstBootstrapKey = generateBootstrapKey()
   const first = await createTestGame(t, { storage, bootstrapKey: firstBootstrapKey })
 
-  await first.submit('x')
+  await first.submit('a')
 
   const firstPlayerKey = first.state.playerKey
   t.is(first.state.leaderboard.length, 1)
@@ -163,7 +215,7 @@ test('changing the bootstrap key isolates persisted game state', async (t) => {
   })
 
   t.is(reopenedFirst.state.playerKey, firstPlayerKey)
-  t.alike(reopenedFirst.state.leaderboard, [{ program: 'x', author: firstPlayerKey, score: 1 }])
+  t.alike(reopenedFirst.state.leaderboard, [{ program: 'a', author: firstPlayerKey, score: 1 }])
 })
 
 test('a remote Autobase update emits newly derived game state', async (t) => {
@@ -178,10 +230,10 @@ test('a remote Autobase update emits newly derived game state', async (t) => {
     })
   })
 
-  await alice.submit('hello')
+  await alice.submit('abc&^')
   await replicateAndSync([alice, bob])
 
   const state = await remoteState
-  t.is(state.leaderboard[0].program, 'hello')
+  t.is(state.leaderboard[0].program, 'abc&^')
   t.is(state.leaderboard[0].author, alice.state.playerKey)
 })

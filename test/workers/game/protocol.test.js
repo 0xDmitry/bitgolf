@@ -17,20 +17,20 @@ const {
 const ALICE = 'a'.repeat(64)
 
 test('submission protocol accepts the canonical event', (t) => {
-  const event = createSubmission('hello')
+  const event = createSubmission('ab&')
 
   t.alike(event, {
     v: 1,
     type: 'submission',
     challenge: 'stub-v1',
-    program: 'hello'
+    program: 'ab&'
   })
   t.ok(isValidSubmission(event))
   t.alike(decodeSubmission(encodeSubmission(event)), event)
 })
 
 test('submission protocol rejects malformed events', (t) => {
-  const valid = createSubmission('hello')
+  const valid = createSubmission('ab&')
   const malformed = [
     null,
     [],
@@ -47,9 +47,9 @@ test('submission protocol rejects malformed events', (t) => {
   for (const event of malformed) t.absent(isValidSubmission(event))
 })
 
-test('submission protocol enforces program and encoded size bounds', (t) => {
-  t.ok(isValidSubmission(createSubmission('x'.repeat(MAX_PROGRAM_LENGTH))))
-  t.absent(isValidSubmission(createSubmission('x'.repeat(MAX_PROGRAM_LENGTH + 1))))
+test('submission protocol enforces raw program and encoded size bounds', (t) => {
+  t.ok(isValidSubmission(createSubmission(validProgramOfLength(MAX_PROGRAM_LENGTH))))
+  t.absent(isValidSubmission(createSubmission(validProgramOfLength(MAX_PROGRAM_LENGTH + 1))))
 
   const oversized = Buffer.alloc(MAX_ENCODED_EVENT_BYTES + 1, 0x78)
   t.is(decodeSubmission(oversized), null)
@@ -79,10 +79,14 @@ test('submission encoder rejects invalid events', (t) => {
 })
 
 test('accepted submission protocol authenticates full writer keys', (t) => {
-  const accepted = { ...createSubmission('hello'), author: ALICE }
+  const accepted = { ...createSubmission('abc&^'), author: ALICE }
 
   t.ok(isValidAcceptedSubmission(accepted))
   t.absent(isValidAcceptedSubmission({ ...accepted, author: 'a'.repeat(63) }))
   t.absent(isValidAcceptedSubmission({ ...accepted, author: 'g'.repeat(64) }))
   t.absent(isValidAcceptedSubmission({ ...accepted, score: 5 }))
 })
+
+function validProgramOfLength(length) {
+  return `a${'!'.repeat(length - 1)}`
+}

@@ -57,7 +57,7 @@ test('game task accepts a submission and returns its derived score', async (t) =
 
   pipe.emit(
     'data',
-    JSON.stringify({ type: 'game:submit', requestId: 'submission-1', program: 'hello' })
+    JSON.stringify({ type: 'game:submit', requestId: 'submission-1', program: 'abc&^' })
   )
   await game.commandQueue
 
@@ -72,11 +72,11 @@ test('game task accepts a submission and returns its derived score', async (t) =
   })
   t.is(state.leaderboard.length, 1)
   t.is(state.leaderboard[0].score, 5)
-  t.is(state.leaderboard[0].program, 'hello')
+  t.is(state.leaderboard[0].program, 'abc&^')
   t.is(state.leaderboard[0].author, playerKey)
 })
 
-test('game task rejects invalid and oversized submissions', async (t) => {
+test('game task rejects empty, malformed, and oversized programs', async (t) => {
   const pipe = new TestPipe()
   const game = new WorkerTask(pipe, await t.tmp(), { network: false })
   t.teardown(() => game.close(), { force: true })
@@ -87,10 +87,14 @@ test('game task rejects invalid and oversized submissions', async (t) => {
   pipe.emit('data', JSON.stringify({ type: 'game:submit', requestId: 'empty', program: '' }))
   pipe.emit(
     'data',
+    JSON.stringify({ type: 'game:submit', requestId: 'unsupported', program: 'hello' })
+  )
+  pipe.emit(
+    'data',
     JSON.stringify({
       type: 'game:submit',
       requestId: 'oversized',
-      program: 'x'.repeat(MAX_PROGRAM_LENGTH + 1)
+      program: `a${'!'.repeat(MAX_PROGRAM_LENGTH)}`
     })
   )
   await game.commandQueue
@@ -100,6 +104,7 @@ test('game task rejects invalid and oversized submissions', async (t) => {
     results.map(({ requestId, valid }) => ({ requestId, valid })),
     [
       { requestId: 'empty', valid: false },
+      { requestId: 'unsupported', valid: false },
       { requestId: 'oversized', valid: false }
     ]
   )

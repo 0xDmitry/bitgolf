@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "autobase": "7.28.1",
+    "bare-ansi-escapes": "2.2.3",
     "bare-os": "^3.9.0",
     "bare-path": "^3.0.0",
     "bare-process": "^4.5.0",
