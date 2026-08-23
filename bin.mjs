@@ -6,6 +6,7 @@ import { isWindows } from 'which-runtime'
 import path from 'bare-path'
 import pkg from './package.json'
 import App from './app.js'
+import Terminal from './terminal.js'
 
 const appName = pkg.productName || pkg.name
 const isDev = path.basename(Bare.argv[0]) === (isWindows ? 'bare.exe' : 'bare')
@@ -29,8 +30,6 @@ const updates = cmd.flags.updates
 const storage = cmd.flags.storage || (isDev ? null : path.join(persistent(), appName))
 const dir = storage || path.join(os.tmpdir(), 'pear', appName)
 
-console.log(`Updates: ${updates === false ? 'disabled' : 'enabled'}`)
-
 const app = new App({
   dir,
   app: isDev ? null : os.execPath(),
@@ -39,27 +38,57 @@ const app = new App({
   upgrade: pkg.upgrade,
   name: isWindows ? appName + '.exe' : appName
 })
+const terminal = new Terminal({ input: process.stdin, output: process.stdout })
 
-app.on('message', (message) => console.log(message))
-app.on('updating', () => console.log('[updater] getting new update'))
-app.on('updating-delta', (delta) => console.log('[updater]', delta))
-app.on('updated', () => console.log('[updater] update complete... applying'))
-app.on('update-applied', () =>
-  console.log('[updater] applied update, restart to run latest version')
-)
-app.on('game-ready', () => console.log('[game] worker ready'))
-app.on('game-error', ({ code, error }) => console.error(`[game:${code}]`, error))
-app.on('error', (err) => console.error('[app:error]', err))
+let request = 0
+let stopping = null
 
-process.on('SIGHUP', () => app.exit(129))
-process.on('SIGINT', () => app.exit(130))
-process.on('SIGQUIT', () => app.exit(131))
-process.on('SIGTERM', () => app.exit(143))
+terminal.on('submit', (program) => {
+  if (!app.gameReady) {
+    terminal.showError('game worker is still connecting')
+    return
+  }
+
+  terminal.showSubmitting()
+
+  try {
+    app.sendGame({
+      type: 'game:submit',
+      requestId: `submission-${++request}`,
+      program
+    })
+  } catch (err) {
+    terminal.showError(err.message)
+  }
+})
+terminal.on('exit', (code) => stop(code))
+
+app.on('game-message', (message) => {
+  if (message.type === 'game:state') terminal.updateState(message)
+  if (message.type === 'game:submit-result') terminal.showSubmission(message)
+  if (message.type === 'game:warning') terminal.showWarning(message.warning)
+})
+app.on('game-error', ({ error }) => terminal.showError(error))
+app.on('error', (err) => terminal.showError(err.message))
+
+process.on('SIGHUP', () => stop(129))
+process.on('SIGINT', () => stop(130))
+process.on('SIGQUIT', () => stop(131))
+process.on('SIGTERM', () => stop(143))
 
 try {
+  await terminal.ready()
   await app.ready()
-  console.log('\nCLI ready. Press Ctrl+C to stop.\n')
 } catch (err) {
-  console.error('[app:error]', err)
-  await app.close().finally(() => Bare.exit(1))
+  terminal.showError(err.message)
+  await stop(1)
+}
+
+async function stop(code = 0) {
+  if (stopping !== null) return stopping
+
+  Bare.exitCode = code
+  stopping = Promise.allSettled([terminal.close(), app.close()])
+  await stopping
+  Bare.exit(code)
 }

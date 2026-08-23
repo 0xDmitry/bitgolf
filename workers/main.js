@@ -35,8 +35,6 @@ if (updaterConfig.updates !== false) {
   })
 }
 
-console.log('Application storage:', pear.storage)
-
 pear.updater.on('updating', () => pipe.write('updating'))
 pear.updater.on('updated', () => pipe.write('updated'))
 pear.on('minver-required', () => pipe.write('minver-required')) // for mobile store update notification

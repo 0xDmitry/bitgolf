@@ -1,6 +1,6 @@
 const { test } = require('brittle')
 
-const App = require('./app.js')
+const App = require('../app.js')
 
 test('app validates and routes structured game messages', (t) => {
   const app = new App({})

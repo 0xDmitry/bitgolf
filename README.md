@@ -1,166 +1,166 @@
-# hello-pear-bare
+# Bit Golf
 
-> Pear Hello World for Standalone Bare Processes with `pear-runtime` worker
+Bit Golf is a global peer-to-peer terminal code-golf game built on Pear and Bare. Every installation joins the same Autobase, derives the same ordered submission log, and computes the leaderboard locally.
 
-End-to-end boilerplate for embedding [pear-runtime] into the [Bare] worker of a [Bare] CLI with peer-to-peer OTA update support.
+## Install and run
 
-This boilerplate uses the companion [`hello-pear-worker`][hello-pear-worker] as a reusable cross-platform local backend. Keeping networking, storage and updates in a separate worker lets mobile apps, desktop UIs and standalone Bare applications share the same backend implementation while each parent owns its platform-specific interface.
+Install a published build with Pear, then start the CLI:
 
-- Peer-to-Peer deployment with [pear][pear-docs] CLI
-- Peer-to-Peer Over-the-Air updates with [`pear-runtime`][pear-runtime] module
-- Bare worker process via `PearRuntime.run(...)`
-- Cross-platform standalone distributables via [`bare-build`][bare-build]
+```sh
+pear install pear://<published-bitgolf-app-key>
+bitgolf
+```
 
-## Variants
+The Pear application key installs Bit Golf; it is separate from the Autobase bootstrap key described below.
 
-- (current) [`main`](https://github.com/holepunchto/hello-pear-bare/tree/main): runs `pear-runtime` inside a Bare worker thread.
-- [`single-thread`](https://github.com/holepunchto/hello-pear-bare/tree/variant/single-thread): workerless with `pear-runtime` updates.
-- [`daemon`](https://github.com/holepunchto/hello-pear-bare/tree/variant/daemon): runs `pear-runtime` in a detached updater daemon.
-
-## Table of Contents
-
-- [OS Support](#os-support)
-- [Requirements](#requirements)
-- [Development](#development)
-  - [Install Dependencies](#install-dependencies)
-  - [Create an upgrade link](#create-an-upgrade-link)
-  - [Start](#start)
-- [Architecture](#architecture)
-  - [Updates](#updates)
-  - [Workers](#workers)
-- [Peer-to-Peer Deployments](#peer-to-peer-deployments)
-- [Installing Distributables](#installing-distributables)
-- [Scripts](#scripts)
-- [Project Structure](#project-structure)
-- [Troubleshooting](#troubleshooting)
-
-## OS Support
-
-- **macOS** — arm64, x64
-- **Linux** — arm64, x64
-- **Windows** — arm64, x64
-
-## Requirements
-
-- `npm` via [Node.js][nodejs]
-- [pear][pear-docs] - `npx pear`
-
-## Development
-
-### Install Dependencies
+To run from source:
 
 ```sh
 npm install
-```
-
-### Create an upgrade link
-
-This template expects `package.json` to contain a valid `pear://` link in the `upgrade` field. If it still contains the placeholder `pear://<YOUR_KEY_HERE>`, startup will fail with `INVALID_URL`.
-
-Create a link with [`pear touch`](https://docs.pears.com/reference/cli.html#pear-touch-flags-channel):
-
-```sh
-pear touch
-```
-
-Copy the generated `pear://...` link into the `upgrade` field in `package.json`.
-
-### Start
-
-Start app in development mode:
-
-```sh
 npm start
 ```
 
-By default this repo starts with `--no-updates` in development to avoid local dev binaries being swapped while you iterate.
-
-Enable updates for local flow testing:
+`npm start` runs the Bare CLI with OTA updates disabled. Use `--storage` to choose a persistent development identity:
 
 ```sh
-npm start -- --updates
+npm start -- --storage /tmp/bitgolf-dev
 ```
+
+## Game rules
+
+A submission is a non-empty program string. The MVP verifier is intentionally a stub: it accepts every non-empty string and scores it with `program.length`. Programs are stored as data and are never executed.
+
+The leaderboard has one row per score. The first valid submission encountered in the current Autobase event ordering owns that score. Later submissions with the same score remain in the Autobase event history but do not replace that row. If Autobase later reorders concurrent events, the pure reducer recomputes ownership from the new order.
+
+Submitted protocol events have exactly these fields:
+
+```js
+{
+  v: 1,
+  type: 'submission',
+  challenge: 'stub-v1',
+  program: 'hello'
+}
+```
+
+Every peer validates the event and derives both the score and authenticated author. The author is the full hexadecimal Autobase writer key from `node.from.key`; a short prefix is used only for display.
+
+Protocol bounds are enforced before an optimistic writer is acknowledged:
+
+- protocol version, type, challenge, and exact field set must match;
+- `program` must be a non-empty string no longer than 4,096 characters;
+- an encoded event may be at most 32 KiB;
+- accepted authors must be full 64-character hexadecimal writer keys.
+
+Malformed, unsupported, oversized, or unverifiable events are ignored.
 
 ## Architecture
 
-### Updates
-
-Updates are managed by the `App` class in `app.js`, which wraps the updater lifecycle as a ready resource and emits update events for `bin.mjs` to log.
-
-The worker uses `pear-runtime` and the configured `upgrade` link in `package.json`.
-
-Per-run disable updates:
-
-```sh
-npm start -- --no-updates
+```text
+bin.mjs                         terminal input and rendering
+   |
+app.js                         worker lifecycle
+   |
+framed JSON IPC
+   |
+workers/index.js
+   |
+workers/worker-task.js         game commands and state events
+   |
+workers/game/
+   |-- Corestore               persistent local identity and data
+   |-- Autobase 7.28.1         deterministic multiwriter ordering
+   |-- Hyperswarm              peer discovery and replication
+   |-- events Hypercore view   accepted ordered submissions
+   `-- pure reducer            leaderboard
 ```
 
-### Workers
+The game worker owns all game storage and networking. It joins the Autobase discovery key, tracks locally connected peers, reads a snapshot of the complete current event view after updates, runs the reducer, and sends the resulting state to the CLI over framed IPC. State derivation is idempotent; no separately mutable leaderboard is persisted.
 
-The CLI starts two independent Bare workers and communicates with each over its own framed IPC stream:
+`workers/main.js` remains a separate worker responsible only for Pear Runtime and OTA updates.
 
-- `workers/main.js` owns Pear Runtime updates.
-- `workers/index.js` owns game commands and will hold the authoritative game state and rules.
+## Optimistic non-member submissions
 
-Game IPC uses JSON objects with a required `type`. The worker currently exposes a readiness event and a `game:ping` health check; game-specific commands and state transitions belong in `workers/worker-task.js`.
+The project pins Autobase `7.28.1` and enables optimistic writes on both the base and each submission append:
 
-`await app.ready()` waits for the game worker's readiness handshake. After that, `app.sendGame(message)` sends a structured command; an unavailable worker is reported as an error instead of accepting a move that cannot be handled.
-
-## Peer-to-Peer Deployments
-
-Use the [`pear`][pear-docs] CLI to deploy applications.
-
-Set the `upgrade` field in `package.json` to your distribution drive link, then follow the default flow from section 4 onward:
-
-[hello-pear-electron: 4. Build Deployment Directory and onward](https://github.com/holepunchto/hello-pear-electron#4-build-deployment-directory-)
-
-## Installing Distributables
-
-Once the `pear://<key>` upgrade link is seeding the build deployment folder the CLI standalone binary can be installed peer-to-peer directly onto the system with Pear:
-
-```sh
-npx pear-install pear://<key>
+```js
+await base.append(encodedEvent, { optimistic: true })
 ```
 
-## Scripts
+This allows a peer that is not an Autobase member to propose a block. During `apply()`, Bit Golf validates the block, verifies the program, and only then calls:
 
-- `npm start` - run the Bare CLI in dev mode (`bare bin.mjs --no-updates`)
-- `npm test` - run `brittle-bare` tests
-- `npm run lint` - run prettier check and lunte
-- `npm run format` - format repository with prettier
-- `npm run make` - auto-detect host OS/arch and run matching build target
-- `npm run make:darwin-arm64` - build standalone to `out/darwin-arm64`
-- `npm run make:darwin-x64` - build standalone to `out/darwin-x64`
-- `npm run make:linux-arm64` - build standalone to `out/linux-arm64`
-- `npm run make:linux-x64` - build standalone to `out/linux-x64`
-- `npm run make:win32-arm64` - build standalone to `out/win32-arm64`
-- `npm run make:win32-x64` - build standalone to `out/win32-x64`
+```js
+await host.ackWriter(node.from.key)
+```
 
-## Project Structure
+The acknowledged event is appended to the derived view with its authenticated author. `ackWriter()` acknowledges the optimistic writer without permanently adding it as a normal writer or indexer. Repeated submissions from the same non-member work: every valid optimistic block is independently validated and acknowledged as it is applied. Invalid blocks are not acknowledged and do not enter the view.
 
-- `bin.mjs` - CLI entrypoint and runtime wiring
-- `app.test.js` - app IPC contract tests
-- `app.js` - lifecycle and IPC wiring for both workers
-- `workers/main.js` - Bare updater worker
-- `workers/index.js` - Bare game worker entrypoint
-- `workers/index.test.js` - real game worker IPC test
-- `workers/worker-task.test.js` - game command unit tests
-- `workers/worker-task.js` - game command boundary and future authoritative game logic
-- `scripts/make.js` - platform/arch build target selector
-- `test/index.js` - colocated test-suite aggregator
+Hyperswarm connections are replicated through Autobase itself:
 
-## Troubleshooting
+```js
+swarm.on('connection', (connection) => {
+  base.replicate(connection)
+})
+```
 
-- `INVALID_URL: Invalid URL 'pear://<YOUR_KEY_HERE>'` means the placeholder `upgrade` link in `package.json` has not been replaced. Run `pear touch`, then put the generated `pear://...` link in `package.json`.
-- If updates do not trigger, verify `package.json` contains a valid `upgrade` Pear link and that peers are seeding the target drive.
-- If `npm run make` fails on unsupported hosts, run a specific `make:<platform>-<arch>` script or build on a supported host.
-- This template does not implement app-level data persistence; it is a minimal CLI + updater example.
+Using `base.replicate(connection)` rather than only `store.replicate(connection)` is intentional in Autobase 7.28.1: it also registers Autobase's wakeup protocol on the replication stream.
 
-<!-- Reference Links -->
+## Generate the bootstrap key
 
-[pear-docs]: https://docs.pears.com
-[hello-pear-worker]: https://github.com/holepunchto/hello-pear-worker
-[pear-runtime]: https://github.com/holepunchto/pear-runtime
-[Bare]: https://github.com/holepunchto/bare
-[nodejs]: https://nodejs.org
-[bare-build]: https://github.com/holepunchto/bare-build
+Generate a new unowned Autobase namespace once with:
+
+```sh
+npm run generate-bootstrap-key
+```
+
+The command prints a fresh bootstrap key without creating storage or retaining a private creator identity. Put the printed hexadecimal key in `GAME_BOOTSTRAP_HEX` in `workers/game/constants.js`. That checked-in constant is the production game bootstrap used by normal clients; tests generate their own keys instead.
+
+This works because every player submits as an optimistic non-member and every accepted event is acknowledged during `apply()`. The bootstrap key is only a shared namespace and discovery anchor; there is no privileged creator to keep online or recover later.
+
+Creating another key creates a different global game, so production bootstrap rotation must be deliberate.
+
+## Two-terminal demo
+
+Terminal A:
+
+```sh
+npm start -- --storage /tmp/bitgolf-a
+```
+
+Terminal B:
+
+```sh
+npm start -- --storage /tmp/bitgolf-b
+```
+
+Both processes use separate local identities while joining the same global game. Enter `hello` in either terminal and both peers should eventually show its score-5 row. Enter `x` in the other terminal and both should show score 1. For two score-5 programs, whichever submission appears first in the current Autobase event view owns that row.
+
+## Persistence
+
+The game Corestore lives under `<storage>/game`. Its namespace is derived from the Autobase bootstrap key. Reusing the same `--storage` path and bootstrap key preserves the local writer identity, replicated event history, and derived leaderboard across restarts. Changing the bootstrap key opens an isolated namespace with a new player identity and an empty game state. Installed builds use Bare's persistent application directory by default; explicit storage paths are recommended for reproducible development and demos.
+
+Do not run two clients against the same storage directory at the same time.
+
+## Tests and lint
+
+Run the Bare test suite and code-quality checks with:
+
+```sh
+npm test
+npm run lint
+```
+
+The suite covers protocol validation, the stub verifier, deterministic reduction and tie semantics, worker IPC, persistence, direct in-process Autobase replication, repeated optimistic non-member submissions, and convergence after concurrent writes. Automated replication tests connect peers directly and do not depend on the public DHT.
+
+## Main files
+
+- `bin.mjs` and `terminal.js` — CLI lifecycle, input, feedback, and rendering
+- `app.js` — updater/game worker lifecycle and framed IPC
+- `workers/main.js` — Pear Runtime and OTA updates
+- `workers/worker-task.js` — game IPC commands and state events
+- `workers/game/index.js` — game lifecycle, Autobase event view, and derived state
+- `workers/game/network.js` — Hyperswarm discovery, replication, and peer count
+- `workers/game/protocol.js` — event creation, validation, encoding, and bounds
+- `workers/game/verifier.js` — replaceable MVP verifier
+- `workers/game/reducer.js` — pure ordered-events-to-leaderboard reduction
+- `scripts/generate-bootstrap-key.js` — one-time unowned bootstrap-key generator

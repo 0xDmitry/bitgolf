@@ -5,7 +5,7 @@ const ReadyResource = require('ready-resource')
 const GAME_READY_TIMEOUT = 10000
 
 module.exports = class App extends ReadyResource {
-  constructor({ dir, app, updates, version, upgrade, name }) {
+  constructor({ dir, app, updates, version, upgrade, name, gameBootstrapKey, gameNetwork = true }) {
     super()
 
     this.dir = dir
@@ -14,6 +14,8 @@ module.exports = class App extends ReadyResource {
     this.version = version
     this.upgrade = upgrade
     this.name = name
+    this.gameBootstrapKey = gameBootstrapKey
+    this.gameNetwork = gameNetwork
 
     this.updaterIPC = null
     this.updaterPipe = null
@@ -63,7 +65,11 @@ module.exports = class App extends ReadyResource {
   _openGame() {
     this.gameStopped = false
     this.gameReady = false
-    this.gameIPC = PearRuntime.run(require.resolve('./workers/index.js'), [this.dir])
+    this.gameIPC = PearRuntime.run(require.resolve('./workers/index.js'), [
+      this.dir,
+      this.gameBootstrapKey || '',
+      String(this.gameNetwork !== false)
+    ])
     this.gamePipe = new FramedStream(this.gameIPC)
 
     this.gamePipe.on('data', (data) => this._onGameMessage(data))
@@ -71,43 +77,43 @@ module.exports = class App extends ReadyResource {
     const ready = new Promise((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(timeout)
-        this.removeListener('game-ready', onready)
-        this.gamePipe?.removeListener('error', onerror)
-        this.gamePipe?.removeListener('end', onend)
-        this.gamePipe?.removeListener('close', onclose)
-        this.gameIPC?.removeListener('exit', onexit)
+        this.removeListener('game-ready', onReady)
+        this.gamePipe?.removeListener('error', onError)
+        this.gamePipe?.removeListener('end', onEnd)
+        this.gamePipe?.removeListener('close', onClose)
+        this.gameIPC?.removeListener('exit', onExit)
       }
-      const onready = () => {
+      const onReady = () => {
         cleanup()
         resolve()
       }
-      const onerror = (err) => {
+      const onError = (err) => {
         cleanup()
         reject(err)
       }
-      const onend = () => {
+      const onEnd = () => {
         cleanup()
         reject(new Error('Game worker ended before it was ready'))
       }
-      const onclose = () => {
+      const onClose = () => {
         cleanup()
         reject(new Error('Game worker closed before it was ready'))
       }
-      const onexit = (code) => {
+      const onExit = (code) => {
         cleanup()
         reject(new Error(`Game worker exited before ready with code ${code}`))
       }
-      const ontimeout = () => {
+      const onTimeout = () => {
         cleanup()
         reject(new Error('Game worker did not become ready in time'))
       }
-      const timeout = setTimeout(ontimeout, GAME_READY_TIMEOUT)
+      const timeout = setTimeout(onTimeout, GAME_READY_TIMEOUT)
 
-      this.once('game-ready', onready)
-      this.gamePipe.once('error', onerror)
-      this.gamePipe.once('end', onend)
-      this.gamePipe.once('close', onclose)
-      this.gameIPC.once('exit', onexit)
+      this.once('game-ready', onReady)
+      this.gamePipe.once('error', onError)
+      this.gamePipe.once('end', onEnd)
+      this.gamePipe.once('close', onClose)
+      this.gameIPC.once('exit', onExit)
     })
 
     this.gamePipe.on('error', (err) => {
