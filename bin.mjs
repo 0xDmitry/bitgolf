@@ -122,13 +122,13 @@ async function beginUpdate() {
   if (updateNoticeShown) return
 
   updateNoticeShown = true
-  process.stdout.write(`${terminal.opened ? '\n' : ''}Updating Bit Golf...\n`)
+  process.stdout.write(`${terminal.opened ? '\n' : ''}Updating bitgolf...\n`)
 }
 
 async function finishUpdate(version) {
   await beginUpdate()
   const suffix = typeof version === 'string' && version.length > 0 ? ` to v${version}` : ''
-  process.stdout.write(`Update installed${suffix}. Restart Bit Golf.\n`)
+  process.stdout.write(`Update installed${suffix}. Restart bitgolf.\n`)
   await stop(0)
 }
 

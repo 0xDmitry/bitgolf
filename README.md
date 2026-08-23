@@ -23,7 +23,7 @@ TARGET          YOUR OUTPUT
 
 ## Play
 
-Install Bit Golf with Pear:
+Install bitgolf with Pear:
 
 ```sh
 pear install pear://onzw8zpoon5ux1o8sap7kazrporj3hew3dhnqki66dcnjtubtmqo
@@ -41,7 +41,7 @@ New players can start with the interactive local tutorial before joining the glo
 
 ## How it works
 
-A Bit Golf program generates one 8×8 monochrome bitmap.
+A bitgolf program generates one 8×8 monochrome bitmap.
 
 The entire language is:
 
@@ -89,7 +89,7 @@ produces a checkerboard:
 █·█·█·█·
 ```
 
-While you type, Bit Golf evaluates the program and redraws its output in real time.
+While you type, bitgolf evaluates the program and redraws its output in real time.
 
 Once your output exactly matches the target, submit it.
 
@@ -116,7 +116,7 @@ Every valid submission is replicated through the P2P network, and every peer ind
 
 ## Peer-to-peer by design
 
-Bit Golf is built entirely on the Pear stack:
+bitgolf is built entirely on the Pear stack:
 
 - **Bare** runs the standalone terminal application.
 - **Hyperswarm** discovers and connects players directly.
@@ -172,7 +172,7 @@ Source runs disable OTA updates for development. Installed builds use the publis
 
 ## Built for Aleph Hackathon 2026
 
-Bit Golf is an entry for the **Pears Track**.
+bitgolf is an entry for the **Pears Track**.
 
 It demonstrates a standalone Bare CLI, real peer-to-peer multiwriter state, direct peer discovery and replication, persistent local identity/state, and Pear-native installation and OTA updates.
 

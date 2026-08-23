@@ -1009,7 +1009,7 @@ function formatTutorialScreen({
   const lines = [
     ...formatConnectionBlock(state, feedback),
     '',
-    `BIT GOLF — TUTORIAL ${stage.lesson}/8 · ${stageLabel}${replay ? ' · REPLAY' : ''}`,
+    `BITGOLF — TUTORIAL ${stage.lesson}/8 · ${stageLabel}${replay ? ' · REPLAY' : ''}`,
     '',
     ...wrapCopy(stage.copy, columns)
   ]
@@ -1083,7 +1083,7 @@ function formatTutorialCompleteScreen(state, feedback) {
     '',
     'TUTORIAL COMPLETE',
     '',
-    'You now know everything required to play Bit Golf.',
+    'You now know everything required to play bitgolf.',
     '',
     'Solve the bitmap.',
     'Submit your program.',
@@ -1107,7 +1107,7 @@ function formatMaskReferenceScreen(state, feedback, columns) {
   const lines = [
     ...formatConnectionBlock(state, feedback),
     '',
-    'BIT GOLF — MASK REFERENCE',
+    'BITGOLF — MASK REFERENCE',
     '',
     '`abc` describe where you are left-to-right.',
     '`def` describe where you are top-to-bottom.',
@@ -1391,7 +1391,7 @@ function supportsTerminalColors(output) {
 function paintInteractiveLine(line) {
   if (line.length === 0) return ''
 
-  if (/^(BIT GOLF —|TUTORIAL COMPLETE$|PROGRAM$)/.test(line)) {
+  if (/^(BITGOLF —|TUTORIAL COMPLETE$|PROGRAM$)/.test(line)) {
     return BOLD + LIME + line + RESET_STYLE
   }
 

@@ -73,7 +73,7 @@ async function main() {
   if (updateAvailable) {
     blockForUpdate()
     if (!pear.updater.bundled) {
-      throw new Error('OTA updates require an installed Bit Golf executable')
+      throw new Error('OTA updates require an installed bitgolf executable')
     }
     return
   }
