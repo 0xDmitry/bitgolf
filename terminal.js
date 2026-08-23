@@ -2,70 +2,62 @@
 
 const ansiEscapes = require('bare-ansi-escapes')
 const KeyDecoder = require('bare-ansi-escapes/key-decoder')
+const process = require('bare-process')
 const Readline = require('bare-readline')
 const ReadyResource = require('ready-resource')
 
 const CHALLENGES = require('./workers/game/challenges.js')
-const { tokenizeProgram, evaluateAttempt } = require('./workers/game/evaluator.js')
+const { tokenizeProgram, evaluateBitmap, evaluateAttempt } = require('./workers/game/evaluator.js')
 const { bitmapId } = require('./workers/game/protocol.js')
+const TUTORIAL_STAGES = require('./tutorial/challenges.js')
+const { freshTutorialState, normalizeTutorialState } = require('./tutorial/state.js')
 
 const PLAYER_PREFIX_LENGTH = 6
-const MAX_DISPLAY_PROGRAM_LENGTH = 64
+const SCORE_COLUMN_WIDTH = 8
+const PLAYER_COLUMN_WIDTH = 13
+const PROGRAM_COLUMN_OFFSET = SCORE_COLUMN_WIDTH + PLAYER_COLUMN_WIDTH
+const MIN_INLINE_PROGRAM_WIDTH = 8
 const DEFAULT_COLUMNS = 80
 const DEFAULT_ROWS = 24
 const CRLF_DELAY = 100
 const ESCAPE_CODE_TIMEOUT = 50
+const BITMAP_SIZE = 8
+const PIXEL_WIDTH = 2
+const BITMAP_INNER_WIDTH = BITMAP_SIZE * PIXEL_WIDTH
+const BITMAP_PANEL_WIDTH = BITMAP_INNER_WIDTH + 2
+const MISMATCH_PIXEL = '×'
 const { CSI } = ansiEscapes.constants
 const CLEAR_SCREEN = ansiEscapes.eraseDisplay + CSI + 'H'
 const DISABLE_WRAP = CSI + '?7l'
 const ENABLE_WRAP = CSI + '?7h'
+const RESET_STYLE = CSI + '0m'
+const BOLD = CSI + '1m'
+const NORMAL_WEIGHT = CSI + '22m'
+const LIME = CSI + '38;2;176;217;68m'
+const COOL_TEXT = CSI + '38;2;196;203;212m'
+const COOL_MUTED = CSI + '38;2;127;138;155m'
+const COOL_BORDER = CSI + '38;2;70;81;95m'
+const CORAL = CSI + '38;2;255;102;127m'
+const AMBER = CSI + '38;2;230;184;92m'
 const CURRENT_CHALLENGE = CHALLENGES[CHALLENGES.length - 1]
 const CURRENT_CHALLENGE_ID = bitmapId(CURRENT_CHALLENGE.target)
 const MENU_ITEMS = [
-  { label: 'Start tutorial', view: 'tutorial' },
+  { label: 'Tutorial', view: 'tutorial' },
   { label: 'Solve challenge', view: 'challenge' },
   { label: 'Leaderboard', view: 'leaderboard' }
 ]
-const TUTORIAL_PAGES = [
-  {
-    title: 'Coordinate bits',
-    lines: [
-      'Every program draws one 8×8 monochrome image.',
-      '',
-      'a b c   high → low bits of the horizontal coordinate x',
-      'd e f   high → low bits of the vertical coordinate y',
-      '',
-      'Example: a lights the right half; d lights the bottom half.'
-    ]
-  },
-  {
-    title: 'Postfix operators',
-    lines: [
-      'Values go on a stack. Operators consume the values before them.',
-      '',
-      '!       NOT',
-      '&       AND',
-      '|       OR',
-      '^       XOR',
-      '',
-      'Examples: ab& means a AND b; abc&^ means a XOR (b AND c).'
-    ]
-  },
-  {
-    title: 'Valid programs and scoring',
-    lines: [
-      'A complete program never underflows and ends with one stack value.',
-      '',
-      'Whitespace is ignored. Every language token costs one byte.',
-      'Only programs that draw the target can be submitted; lower scores are better.',
-      '',
-      'The live preview and diff update after every edit.'
-    ]
-  }
-]
+const TUTORIAL_STAGE_BY_KEY = new Map(TUTORIAL_STAGES.map((stage) => [stage.key, stage]))
+const GLOBAL_COMMANDS = new Set([':masks', ':tutorial', ':tutorial reset'])
+const ALL_TUTORIAL_LESSONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8])
 
 module.exports = class Terminal extends ReadyResource {
-  constructor({ input, output, challengeId = CURRENT_CHALLENGE_ID }) {
+  constructor({
+    input,
+    output,
+    challengeId = CURRENT_CHALLENGE_ID,
+    tutorialState = null,
+    persistTutorialState = null
+  }) {
     super()
 
     const challenge = CHALLENGES.find(({ target }) => bitmapId(target) === challengeId)
@@ -76,15 +68,27 @@ module.exports = class Terminal extends ReadyResource {
     this.challenge = challenge
     this.challengeId = bitmapId(challenge.target)
     this.interactive = input.isTTY === true && output.isTTY === true
+    this.colors = supportsTerminalColors(output)
+    this.tutorialState = normalizeTutorialState(tutorialState || freshTutorialState())
+    this.persistTutorialState =
+      typeof persistTutorialState === 'function' ? persistTutorialState : null
+    this.tutorialSaveTail = Promise.resolve()
+    this.tutorialReplay = false
+    this.tutorialStageKey = tutorialStageKey(this.tutorialState)
+    this.tutorialDrafts = { ...this.tutorialState.solutions }
+    this.globalDraft = { program: '', cursor: 0 }
+    this.globalHistory = []
+    this.commandDraft = null
+    this.referenceReturnView = 'challenge'
     this.readline = null
     this.state = null
     this.feedback = null
-    this.editor = editorState('', 0, this.challenge)
     this.restored = false
     this.viewportStart = null
     this.view = this.interactive ? 'menu' : 'combined'
     this.menuIndex = 0
-    this.tutorialPage = 0
+    this.editor = editorState('', 0, this.challenge)
+    this.tutorialSolved = false
 
     this._onLine = this._onLine.bind(this)
     this._onEnd = this._onEnd.bind(this)
@@ -106,6 +110,8 @@ module.exports = class Terminal extends ReadyResource {
     if (this.interactive) {
       this.readline = new LiveEditor({
         input: this.input,
+        line: this.editor.program,
+        cursor: this.editor.cursor,
         onEdit: this._onEditorEdit,
         canSubmit: this._canSubmit,
         onLine: this._onLine,
@@ -130,7 +136,7 @@ module.exports = class Terminal extends ReadyResource {
     this._render(true)
   }
 
-  _close() {
+  async _close() {
     if (this.readline !== null) {
       if (!this.interactive) {
         this.readline.removeListener('line', this._onLine)
@@ -144,6 +150,7 @@ module.exports = class Terminal extends ReadyResource {
     this.input.removeListener('end', this._onInputEnd)
     if (this.interactive) this.output.removeListener('resize', this._onResize)
     this._restoreInput()
+    await this.tutorialSaveTail
   }
 
   updateState(state) {
@@ -184,7 +191,10 @@ module.exports = class Terminal extends ReadyResource {
       challenge: this.challenge,
       columns: this.output.columns || DEFAULT_COLUMNS,
       menuIndex: this.menuIndex,
-      tutorialPage: this.tutorialPage
+      tutorialState: this.tutorialState,
+      tutorialStage: this._tutorialStage(),
+      tutorialSolved: this.tutorialSolved,
+      tutorialReplay: this.tutorialReplay
     })
   }
 
@@ -224,7 +234,8 @@ module.exports = class Terminal extends ReadyResource {
           this.output.columns || DEFAULT_COLUMNS,
           opening,
           viewportStart,
-          viewport
+          viewport,
+          this.colors
         )
       )
     } else {
@@ -235,18 +246,60 @@ module.exports = class Terminal extends ReadyResource {
   _onEditorEdit(program, cursor) {
     this.viewportStart = null
 
-    if (program !== this.editor.program) {
+    const tutorial = this.view === 'tutorial'
+    const editable = tutorial || this.view === 'challenge' || this.view === 'combined'
+    const previous = this.editor
+
+    if (!editable) return
+
+    if (this._commandActive() && !program.startsWith(':')) {
+      this._cancelCommandMode()
+      return
+    }
+
+    if (this.interactive && program.startsWith(':') && !previous.program.startsWith(':')) {
+      this.commandDraft = {
+        view: this.view,
+        stage: tutorial ? this.tutorialStageKey : null,
+        program: previous.program,
+        cursor: previous.cursor
+      }
+    }
+
+    const editorChallenge = tutorial ? this._tutorialStage() : this.challenge
+
+    if (program !== previous.program) {
       this.feedback = null
-      this.editor = editorState(program, cursor, this.challenge)
+      this.editor = editorState(program, cursor, editorChallenge)
     } else {
       this.editor.cursor = cursor
+    }
+
+    if (tutorial) {
+      if (!program.startsWith(':')) {
+        this.tutorialDrafts[this.tutorialStageKey] = program
+      }
+
+      if (this.editor.evaluation.matches && !this.tutorialSolved) {
+        this._markTutorialSolved(program)
+      }
+    } else if (!program.startsWith(':')) {
+      this.globalDraft = { program, cursor }
     }
 
     this._render()
   }
 
   _canSubmit(program) {
-    const evaluation = evaluateAttempt(program, this.challenge)
+    const command = normalizeCommand(program)
+
+    if (command !== null) {
+      if (this.view === 'tutorial') return false
+      return GLOBAL_COMMANDS.has(command) ? { accept: true, remember: false } : false
+    }
+
+    const tutorial = this.view === 'tutorial'
+    const evaluation = evaluateAttempt(program, tutorial ? this._tutorialStage() : this.challenge)
 
     this.editor = {
       program,
@@ -254,11 +307,32 @@ module.exports = class Terminal extends ReadyResource {
       evaluation
     }
 
+    if (tutorial && evaluation.matches && !this.tutorialSolved) {
+      this._markTutorialSolved(program)
+    }
+
+    if (tutorial) {
+      return this.tutorialSolved ? { accept: true, remember: false } : false
+    }
+
     return evaluation.matches
   }
 
   _onLine(program) {
     this.viewportStart = null
+
+    if (this.interactive && this._handleCommand(program)) return
+
+    if (this.view === 'tutorial') {
+      const evaluation = evaluateAttempt(program, this._tutorialStage())
+      this.editor = { program, cursor: program.length, evaluation }
+
+      if (evaluation.matches && !this.tutorialSolved) this._markTutorialSolved(program)
+
+      if (this.tutorialSolved) this._advanceTutorial()
+      else this._render()
+      return
+    }
 
     const evaluation = evaluateAttempt(program, this.challenge)
 
@@ -272,8 +346,221 @@ module.exports = class Terminal extends ReadyResource {
     this.editor = this.interactive
       ? editorState('', 0, this.challenge)
       : { program, cursor: program.length, evaluation }
+    if (this.interactive) this.globalDraft = { program: '', cursor: 0 }
     this.emit('submit', program, this.challengeId)
     this._render()
+  }
+
+  _tutorialStage() {
+    const stage = TUTORIAL_STAGE_BY_KEY.get(this.tutorialStageKey)
+    if (stage === undefined) throw new Error(`Unknown tutorial stage: ${this.tutorialStageKey}`)
+    return stage
+  }
+
+  _markTutorialSolved(program) {
+    if (this.tutorialSolved) return
+
+    const stage = this._tutorialStage()
+    const completed = new Set(this.tutorialState.completed)
+    const solutions = { ...this.tutorialState.solutions, [stage.key]: program }
+    let current = this.tutorialState.current
+    let tutorialStage = this.tutorialState.stage
+
+    this.tutorialSolved = true
+    this.tutorialDrafts[stage.key] = program
+
+    if (stage.key === '8a') {
+      current = 8
+      tutorialStage = '8b'
+    } else {
+      completed.add(stage.lesson)
+      current = stage.lesson === 8 ? 8 : stage.lesson + 1
+    }
+
+    this._updateTutorialState({
+      ...this.tutorialState,
+      completed: [...completed].sort((a, b) => a - b),
+      current,
+      stage: tutorialStage,
+      solutions
+    })
+  }
+
+  _advanceTutorial() {
+    const index = TUTORIAL_STAGES.findIndex((stage) => stage.key === this.tutorialStageKey)
+
+    if (index === TUTORIAL_STAGES.length - 1) {
+      this._updateTutorialState({
+        ...this.tutorialState,
+        completed: [...ALL_TUTORIAL_LESSONS],
+        current: 8,
+        stage: '8b',
+        tutorialComplete: true
+      })
+      this.view = 'tutorial-complete'
+      this.viewportStart = null
+      this.commandDraft = null
+      this.editor = editorState('', 0, this._tutorialStage())
+      this._render()
+      return
+    }
+
+    const next = TUTORIAL_STAGES[index + 1]
+    this.tutorialStageKey = next.key
+    const program = this.tutorialDrafts[next.key] || ''
+    this.editor = editorState(program, program.length, next)
+    this.tutorialSolved = this.editor.evaluation.matches
+    this.commandDraft = null
+    this.readline.setLine(program, program.length)
+    this.viewportStart = null
+    this._render()
+  }
+
+  _startTutorial({ replay = false, reset = false } = {}) {
+    if (reset) this.tutorialState = freshTutorialState()
+
+    const entering = this.view !== 'tutorial'
+    this._captureGlobalDraft()
+    if (entering) {
+      this.globalHistory = [...this.readline.history]
+      this.readline.setHistory([])
+    }
+    this.tutorialReplay = replay || this.tutorialState.tutorialComplete
+    if (!this.tutorialReplay && !this.tutorialState.started) {
+      this._updateTutorialState({ ...this.tutorialState, started: true })
+    }
+    this.tutorialDrafts = this.tutorialReplay ? {} : { ...this.tutorialState.solutions }
+    this.tutorialStageKey = this.tutorialReplay ? '1' : tutorialStageKey(this.tutorialState)
+    this.commandDraft = null
+    this.feedback = null
+    this.view = 'tutorial'
+    this.viewportStart = null
+
+    const stage = this._tutorialStage()
+    const program = this.tutorialDrafts[stage.key] || ''
+    this.editor = editorState(program, program.length, stage)
+    this.tutorialSolved = this.editor.evaluation.matches
+    this.readline.setLine(program, program.length)
+    this._render()
+  }
+
+  _leaveTutorial(view = 'menu') {
+    this.tutorialReplay = false
+    this.commandDraft = null
+    this.view = view
+    this.viewportStart = null
+    this.editor = editorState(this.globalDraft.program, this.globalDraft.cursor, this.challenge)
+    this.readline.setLine(this.globalDraft.program, this.globalDraft.cursor)
+    this.readline.setHistory(this.globalHistory)
+    this._render()
+  }
+
+  _captureGlobalDraft() {
+    if (this.view !== 'challenge' && this.view !== 'menu' && this.view !== 'leaderboard') return
+    if (this.readline === null || this.readline.line.startsWith(':')) return
+
+    this.globalDraft = {
+      program: this.readline.line,
+      cursor: this.readline.cursor
+    }
+  }
+
+  _handleCommand(program) {
+    const command = normalizeCommand(program)
+    if (command === null) return false
+
+    if (this.view === 'tutorial') {
+      return false
+    }
+
+    if (this.view !== 'challenge' || !GLOBAL_COMMANDS.has(command)) return false
+
+    this._restoreCommandDraft(false)
+
+    if (command === ':masks') {
+      this._openMaskReference('challenge')
+    } else if (command === ':tutorial reset') {
+      this._startTutorial({ reset: true })
+    } else {
+      this._startTutorial({ replay: this.tutorialState.tutorialComplete })
+    }
+
+    return true
+  }
+
+  _enterCommandMode() {
+    const tutorial = this.view === 'tutorial'
+
+    this.commandDraft = {
+      view: this.view,
+      stage: tutorial ? this.tutorialStageKey : null,
+      program: this.readline.line,
+      cursor: this.readline.cursor
+    }
+    this.editor = editorState(':', 1, tutorial ? this._tutorialStage() : this.challenge)
+    this.readline.setLine(':', 1)
+    this.viewportStart = null
+    this._render()
+  }
+
+  _commandActive() {
+    if (this.commandDraft === null || this.commandDraft.view !== this.view) return false
+    return this.view !== 'tutorial' || this.commandDraft.stage === this.tutorialStageKey
+  }
+
+  _cancelCommandMode() {
+    if (!this._commandActive()) return false
+    this._restoreCommandDraft(this.view === 'tutorial')
+    this.viewportStart = null
+    this._render()
+    return true
+  }
+
+  _restoreCommandDraft(tutorial) {
+    const stage = tutorial ? this._tutorialStage() : this.challenge
+    const fallback = tutorial
+      ? { program: this.tutorialDrafts[this.tutorialStageKey] || '', cursor: 0 }
+      : this.globalDraft
+    const saved =
+      this.commandDraft !== null &&
+      this.commandDraft.view === this.view &&
+      (!tutorial || this.commandDraft.stage === this.tutorialStageKey)
+        ? this.commandDraft
+        : fallback
+
+    this.commandDraft = null
+    const cursor = Math.min(saved.program.length, saved.cursor)
+    this.editor = editorState(saved.program, cursor, stage)
+    this.readline.setLine(saved.program, cursor)
+  }
+
+  _openMaskReference(returnView) {
+    this.referenceReturnView = returnView
+    this.view = 'mask-reference'
+    this.viewportStart = null
+    this._render()
+  }
+
+  _updateTutorialState(state) {
+    this.tutorialState = normalizeTutorialState(state)
+    this._queueTutorialState()
+  }
+
+  _queueTutorialState() {
+    const snapshot = cloneTutorialState(this.tutorialState)
+    this.emit('tutorial-state', snapshot)
+
+    if (this.persistTutorialState === null) return
+
+    this.tutorialSaveTail = this.tutorialSaveTail
+      .then(() => this.persistTutorialState(snapshot))
+      .catch((err) => {
+        this.feedback = {
+          type: 'warning',
+          message: `tutorial progress was not saved: ${err.message}`
+        }
+        this._render()
+      })
   }
 
   _onEnd() {
@@ -311,6 +598,13 @@ module.exports = class Terminal extends ReadyResource {
       return true
     }
 
+    if (this.view === 'challenge' && isPrintableKey(key) && key.sequence === ':') {
+      if (!this._commandActive()) this._enterCommandMode()
+      return true
+    }
+
+    if (key.name === 'escape' && this._cancelCommandMode()) return true
+
     if (this.view === 'menu') {
       if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
         this.menuIndex = (this.menuIndex + MENU_ITEMS.length - 1) % MENU_ITEMS.length
@@ -331,21 +625,31 @@ module.exports = class Terminal extends ReadyResource {
 
     if (this.view === 'tutorial') {
       if (key.name === 'escape') {
-        this._setView('menu')
-      } else if (key.name === 'left') {
-        if (this.tutorialPage > 0) {
-          this.tutorialPage--
-          this.viewportStart = null
-          this._render()
-        }
-      } else if (key.name === 'right' || key.name === 'return' || key.name === 'linefeed') {
-        if (this.tutorialPage === TUTORIAL_PAGES.length - 1) {
-          this._setView('challenge')
-        } else {
-          this.tutorialPage++
-          this.viewportStart = null
-          this._render()
-        }
+        this._leaveTutorial('menu')
+        return true
+      }
+
+      return false
+    }
+
+    if (this.view === 'tutorial-complete') {
+      if (key.name === 'return' || key.name === 'linefeed') this._leaveTutorial('challenge')
+      else if (key.name === 'escape') this._leaveTutorial('menu')
+      return true
+    }
+
+    if (this.view === 'mask-reference') {
+      if (key.name === 'pageup' || key.name === 'pagedown') return false
+
+      if (
+        key.name === 'escape' ||
+        key.name === 'return' ||
+        key.name === 'linefeed' ||
+        (isPrintableKey(key) && key.sequence.toLowerCase() === 'q')
+      ) {
+        this.view = this.referenceReturnView
+        this.viewportStart = null
+        this._render()
       }
 
       return true
@@ -384,7 +688,11 @@ module.exports = class Terminal extends ReadyResource {
   _openMenuItem(index) {
     this.menuIndex = index
 
-    if (MENU_ITEMS[index].view === 'tutorial') this.tutorialPage = 0
+    if (MENU_ITEMS[index].view === 'tutorial') {
+      this._startTutorial({ replay: this.tutorialState.tutorialComplete })
+      return
+    }
+
     this._setView(MENU_ITEMS[index].view)
   }
 
@@ -417,10 +725,20 @@ module.exports = class Terminal extends ReadyResource {
 }
 
 class LiveEditor {
-  constructor({ input, onEdit, canSubmit, onLine, onEnd, onPage, onNavigate }) {
+  constructor({
+    input,
+    line = '',
+    cursor = line.length,
+    onEdit,
+    canSubmit,
+    onLine,
+    onEnd,
+    onPage,
+    onNavigate
+  }) {
     this.input = input
-    this.line = ''
-    this.cursor = 0
+    this.line = line
+    this.cursor = cursor
     this.closed = false
     this.history = []
     this.historyCursor = -1
@@ -447,6 +765,17 @@ class LiveEditor {
     this.input.removeListener('data', this._onInput)
     this.decoder.removeListener('data', this._onKey)
     this.decoder.destroy()
+  }
+
+  setLine(line, cursor = line.length) {
+    this.line = line
+    this.cursor = Math.min(line.length, Math.max(0, cursor))
+    this.historyCursor = -1
+  }
+
+  setHistory(history) {
+    this.history = [...history]
+    this.historyCursor = -1
   }
 
   _onInput(data) {
@@ -506,10 +835,12 @@ class LiveEditor {
   }
 
   _onSubmit() {
-    if (!this._canSubmit(this.line)) return this._notifyEdit()
+    const acceptance = this._canSubmit(this.line)
+    const accepted = acceptance === true || acceptance?.accept === true
+    if (!accepted) return this._notifyEdit()
 
     const line = this.line
-    const remember = line.trim() !== ''
+    const remember = line.trim() !== '' && acceptance?.remember !== false
 
     if (remember && line !== this.history[0]) this.history.unshift(line)
 
@@ -576,6 +907,29 @@ function isPrintableKey(key) {
   return key.sequence.length > 0
 }
 
+function tutorialStageKey(state) {
+  if (state.current === 8) return state.stage === '8b' ? '8b' : '8a'
+  return String(state.current)
+}
+
+function normalizeCommand(program) {
+  const source = program.trim()
+  if (!source.startsWith(':')) return null
+  return source.toLowerCase().replace(/\s+/g, ' ')
+}
+
+function cloneTutorialState(state) {
+  return {
+    version: state.version,
+    started: state.started,
+    completed: [...state.completed],
+    current: state.current,
+    stage: state.stage,
+    tutorialComplete: state.tutorialComplete,
+    solutions: { ...state.solutions }
+  }
+}
+
 function editorState(program, cursor, challenge) {
   return { program, cursor, evaluation: evaluateAttempt(program, challenge) }
 }
@@ -588,35 +942,52 @@ function formatScreen({
   challenge,
   columns,
   menuIndex,
-  tutorialPage
+  tutorialState,
+  tutorialStage,
+  tutorialSolved,
+  tutorialReplay
 }) {
-  if (view === 'menu') return formatMenuScreen(state, feedback, menuIndex)
-  if (view === 'tutorial') return formatTutorialScreen(state, feedback, tutorialPage)
+  if (view === 'menu') {
+    return formatMenuScreen(state, feedback, menuIndex, tutorialState.tutorialComplete)
+  }
+  if (view === 'tutorial') {
+    return formatTutorialScreen({
+      state,
+      feedback,
+      editor,
+      stage: tutorialStage,
+      columns,
+      solved: tutorialSolved,
+      replay: tutorialReplay,
+      solvedProgram: tutorialState.solutions[tutorialStage.key] || null
+    })
+  }
+  if (view === 'tutorial-complete') return formatTutorialCompleteScreen(state, feedback)
+  if (view === 'mask-reference') return formatMaskReferenceScreen(state, feedback, columns)
   if (view === 'challenge') {
     return formatChallengeScreen(state, feedback, editor, challenge, columns)
   }
-  if (view === 'leaderboard') return formatLeaderboardScreen(state, feedback, challenge)
+  if (view === 'leaderboard') {
+    return formatLeaderboardScreen(state, feedback, challenge, columns)
+  }
   return formatCombinedScreen(state, feedback, editor, challenge, columns)
 }
 
-function formatMenuScreen(state, feedback, menuIndex) {
+function formatMenuScreen(state, feedback, menuIndex, tutorialComplete) {
   const lines = [
-    '',
-    formatConnection(state),
+    ...formatConnectionBlock(state, feedback),
     '',
     'Draw 8×8 monochrome images with tiny postfix Boolean programs.',
     'Every token costs one byte. Lower scores lead the shared leaderboard.'
   ]
-  const notice = formatNotice(feedback)
-
-  if (notice !== null) lines.push(notice)
 
   lines.push('', 'Choose a path:', '')
   const menuRow = lines.length
 
   for (let index = 0; index < MENU_ITEMS.length; index++) {
     const marker = index === menuIndex ? '›' : ' '
-    lines.push(`${marker} ${index + 1}  ${MENU_ITEMS[index].label}`)
+    const label = index === 0 && tutorialComplete ? 'Replay tutorial' : MENU_ITEMS[index].label
+    lines.push(`${marker} ${index + 1}  ${label}`)
   }
 
   lines.push('', '↑/↓ choose · ENTER open · 1-3 shortcut · Ctrl+C quit')
@@ -624,46 +995,156 @@ function formatMenuScreen(state, feedback, menuIndex) {
   return staticScreen(lines, 'bottom', null, menuRow + menuIndex)
 }
 
-function formatTutorialScreen(state, feedback, tutorialPage) {
-  const page = TUTORIAL_PAGES[tutorialPage]
-  const notice = formatNotice(feedback)
+function formatTutorialScreen({
+  state,
+  feedback,
+  editor,
+  stage,
+  columns,
+  solved,
+  replay,
+  solvedProgram
+}) {
+  const stageLabel = stage.subtitle ? `${stage.title} · ${stage.subtitle}` : stage.title
   const lines = [
+    ...formatConnectionBlock(state, feedback),
     '',
-    formatConnection(state),
+    `BIT GOLF — TUTORIAL ${stage.lesson}/8 · ${stageLabel}${replay ? ' · REPLAY' : ''}`,
     '',
-    `TUTORIAL ${tutorialPage + 1}/${TUTORIAL_PAGES.length} · ${page.title}`,
-    '',
-    ...page.lines
+    ...wrapCopy(stage.copy, columns)
   ]
 
-  if (notice !== null) lines.push('', notice)
+  if (stage.key === '1') {
+    lines.push(
+      'MASK RHYTHMS · coarse → fine',
+      'columns →  a ····████   b ··██··██   c ·█·█·█·█',
+      'rows ↓     d ····████   e ··██··██   f ·█·█·█·█'
+    )
+  }
 
-  const finalPage = tutorialPage === TUTORIAL_PAGES.length - 1
-  const footer = finalPage
-    ? '←/→ step · ENTER solve challenge · Esc menu'
-    : '←/→ step · ENTER next · Esc menu'
+  lines.push(
+    '',
+    ...formatTutorialBitmaps(stage.target, editor.evaluation.bitmap, columns),
+    '',
+    `${formatTutorialEvaluation(editor.evaluation)} · ${formatPixelMatch(editor.evaluation.diff)}`
+  )
+
+  if (editor.evaluation.error) lines.push(`error: ${editor.evaluation.error}`)
+
+  if (solved) {
+    const solvedCopy = wrapCopy(stage.solvedCopy, columns)
+    if (solvedCopy.length === 0) lines.push('✓ SOLVED')
+    else lines.push(`✓ SOLVED · ${solvedCopy[0]}`, ...solvedCopy.slice(1))
+
+    if (stage.key === '8b') {
+      const saved =
+        editor.evaluation.matches || solvedProgram === null
+          ? editor.evaluation
+          : evaluateAttempt(solvedProgram, stage)
+      const bonus = editor.evaluation.matches && editor.evaluation.size < 20
+      lines.push(`SOLVED PROGRAM · ${formatBytes(saved.size)}`)
+      lines.push(
+        ...wrapCopy(
+          [
+            bonus
+              ? '✓ BONUS · under 20 bytes'
+              : 'BONUS · Can you generate the same frame in under 20 bytes?'
+          ],
+          columns
+        )
+      )
+    }
+  }
+
+  lines.push('', 'PROGRAM', '')
+
+  const input = formatEditorInput(editor.program, editor.cursor, columns)
+  const editorRow = lines.length
+  lines.push(`> ${input.program}`)
+
+  let action = 'type to draw'
+  if (solved) action = stage.key === '8b' ? 'ENTER finish' : 'ENTER continue'
 
   return {
-    ...staticScreen(lines, 'bottom', null, null, footer),
+    lines,
+    footer: `${action} · Esc leave`,
+    footerMode: 'always',
+    overflowFooter: 'PgUp/PgDn view · Esc leave',
+    scrollable: true,
+    editorRow,
+    cursorColumn: 2 + input.cursor,
+    viewportAnchor: 'editor'
+  }
+}
+
+function formatTutorialCompleteScreen(state, feedback) {
+  const lines = [
+    ...formatConnectionBlock(state, feedback),
+    '',
+    'TUTORIAL COMPLETE',
+    '',
+    'You now know everything required to play Bit Golf.',
+    '',
+    'Solve the bitmap.',
+    'Submit your program.',
+    'Then make it smaller.',
+    '',
+    '[ENTER] join the global game'
+  ]
+  const joinRow = lines.length - 1
+
+  return {
+    ...staticScreen(lines, 'bottom', null, joinRow, 'ENTER join · Esc menu · Ctrl+C quit'),
     footerMode: 'always'
+  }
+}
+
+function formatMaskReferenceScreen(state, feedback, columns) {
+  const masks = ['a', 'b', 'c', 'd', 'e', 'f'].map((token) => ({
+    label: token,
+    bitmap: evaluateBitmap(token).bitmap
+  }))
+  const lines = [
+    ...formatConnectionBlock(state, feedback),
+    '',
+    'BIT GOLF — MASK REFERENCE',
+    '',
+    '`abc` describe where you are left-to-right.',
+    '`def` describe where you are top-to-bottom.',
+    '',
+    'VERTICAL · columns · coarse → fine',
+    ...formatBitmapCollection(masks.slice(0, 3), columns),
+    '',
+    'HORIZONTAL · rows · coarse → fine',
+    ...formatBitmapCollection(masks.slice(3), columns),
+    '',
+    'a ↔ d coarse · b ↔ e · c ↔ f fine'
+  ]
+
+  return {
+    ...staticScreen(lines, 'top', 'PgUp/PgDn view · ENTER/Esc back', null, 'ENTER/Esc back', true),
+    footerMode: 'always',
+    overflowFooter: 'PgUp/PgDn view · ENTER/Esc back'
   }
 }
 
 function formatChallengeScreen(state, feedback, editor, challenge, columns) {
   const input = formatEditorInput(editor.program, editor.cursor, columns)
-  const lines = ['', formatConnection(state), '']
+  const lines = [...formatConnectionBlock(state, feedback), '']
   const { diff, matches } = editor.evaluation
 
   lines.push(...formatChallengeBitmaps(editor.evaluation.bitmap, challenge.target, diff, columns))
   lines.push(formatEvaluation(editor.evaluation, matches), formatDiff(diff))
 
   if (editor.evaluation.error) lines.push(`error: ${editor.evaluation.error}`)
-  if (feedback !== null) lines.push(formatFeedback(feedback).join(' · '))
 
-  lines.push('PROGRAM')
+  lines.push('', 'PROGRAM', '')
 
   const editorRow = lines.length
   lines.push(`> ${input.program}`)
+
+  const actionFeedback = formatActionFeedback(feedback)
+  if (actionFeedback !== null) lines.push(actionFeedback)
 
   const action = matches ? 'ENTER submit' : 'ENTER when matched'
 
@@ -677,20 +1158,16 @@ function formatChallengeScreen(state, feedback, editor, challenge, columns) {
   }
 }
 
-function formatLeaderboardScreen(state, feedback, challenge) {
+function formatLeaderboardScreen(state, feedback, challenge, columns) {
   const leaderboard = challengeLeaderboard(state, bitmapId(challenge.target))
   const lines = [
+    ...formatConnectionBlock(state, feedback),
     '',
-    formatConnection(state),
-    '',
-    ...formatLeaderboard(leaderboard, state === null ? null : state.playerKey)
+    ...formatLeaderboard(leaderboard, state === null ? null : state.playerKey, columns)
   ]
   const overflowFooter = '↑/↓ one row · PgUp/PgDn one page · Esc menu'
 
   if (leaderboard.length === 0) lines.push('(no submissions yet)')
-
-  const notice = formatNotice(feedback)
-  if (notice !== null) lines.push('', notice)
 
   return {
     ...staticScreen(lines, 'top', overflowFooter, null, 'Esc menu', true),
@@ -700,15 +1177,17 @@ function formatLeaderboardScreen(state, feedback, challenge) {
 }
 
 function formatCombinedScreen(state, feedback, editor, challenge, columns) {
-  const lines = []
+  const lines = formatConnectionBlock(state, feedback)
   const { diff, matches } = editor.evaluation
 
-  if (state === null) {
-    lines.push('', 'connecting...')
-  } else {
-    lines.push('', formatConnection(state), '')
+  if (state !== null) {
+    lines.push('')
     lines.push(
-      ...formatLeaderboard(challengeLeaderboard(state, bitmapId(challenge.target)), state.playerKey)
+      ...formatLeaderboard(
+        challengeLeaderboard(state, bitmapId(challenge.target)),
+        state.playerKey,
+        columns
+      )
     )
   }
 
@@ -725,11 +1204,11 @@ function formatCombinedScreen(state, feedback, editor, challenge, columns) {
 
   const editorRow = lines.length
   lines.push(`> ${input.program}`)
+
+  const actionFeedback = formatActionFeedback(feedback)
   lines.push(
     '',
-    feedback === null
-      ? 'target-matching lines submit automatically'
-      : formatFeedback(feedback).join(' · ')
+    actionFeedback === null ? 'target-matching lines submit automatically' : actionFeedback
   )
 
   return {
@@ -768,6 +1247,14 @@ function formatConnection(state) {
   return `connected · ${peers}`
 }
 
+function formatConnectionBlock(state, feedback) {
+  const lines = ['', formatConnection(state)]
+  const notice = formatNotice(feedback)
+
+  if (notice !== null) lines.push(notice)
+  return lines
+}
+
 function challengeLeaderboard(state, challengeId) {
   if (
     state === null ||
@@ -783,6 +1270,11 @@ function challengeLeaderboard(state, challengeId) {
 
 function formatNotice(feedback) {
   if (feedback === null || (feedback.type !== 'error' && feedback.type !== 'warning')) return null
+  return formatFeedback(feedback).join(' · ')
+}
+
+function formatActionFeedback(feedback) {
+  if (feedback === null || feedback.type === 'error' || feedback.type === 'warning') return null
   return formatFeedback(feedback).join(' · ')
 }
 
@@ -822,7 +1314,15 @@ function viewportLayout(screen, rows) {
   }
 }
 
-function renderInteractive(screen, rows, columns, clearDisplay, viewportStart, viewport) {
+function renderInteractive(
+  screen,
+  rows,
+  columns,
+  clearDisplay,
+  viewportStart,
+  viewport,
+  colors = false
+) {
   const height = Math.max(1, rows)
   const width = Math.max(1, columns)
   const paintWidth = Math.max(0, width - 1)
@@ -850,7 +1350,8 @@ function renderInteractive(screen, rows, columns, clearDisplay, viewportStart, v
   if (clearDisplay) rendered += CLEAR_SCREEN
 
   for (let row = 0; row < height; row++) {
-    const line = row < lines.length ? lines[row].slice(0, paintWidth) : ''
+    const plainLine = row < lines.length ? lines[row].slice(0, paintWidth) : ''
+    const line = colors ? paintInteractiveLine(plainLine) : plainLine
     rendered += absoluteCursorPosition(0, row) + ansiEscapes.eraseLine + line
   }
 
@@ -877,6 +1378,91 @@ function formatViewportFooter(start, end, total, hint) {
   return `${start + 1}-${end}/${total} · ${hint}`
 }
 
+function supportsTerminalColors(output) {
+  const env = process.env || {}
+  return (
+    output === process.stdout &&
+    output.isTTY === true &&
+    env.NO_COLOR === undefined &&
+    env.TERM !== 'dumb'
+  )
+}
+
+function paintInteractiveLine(line) {
+  if (line.length === 0) return ''
+
+  if (/^(BIT GOLF —|TUTORIAL COMPLETE$|PROGRAM$)/.test(line)) {
+    return BOLD + LIME + line + RESET_STYLE
+  }
+
+  if (line.startsWith('› ')) return BOLD + LIME + line + RESET_STYLE
+  if (line.startsWith('✓ ')) return BOLD + LIME + line + RESET_STYLE
+  if (
+    /^(Choose a path:|MASK RHYTHMS|VERTICAL|HORIZONTAL|SCORE)/.test(line) ||
+    (!line.includes(' · ') &&
+      /^(?:OUTPUT|TARGET|DIFF|YOUR OUTPUT)(?:\s{2,}(?:OUTPUT|TARGET|DIFF|YOUR OUTPUT))*$/.test(
+        line
+      ))
+  ) {
+    return BOLD + COOL_MUTED + line + RESET_STYLE
+  }
+
+  let base = COOL_TEXT
+
+  if (/^(connected|connecting)/.test(line) || /(?:Esc|Ctrl\+C|PgUp\/PgDn|↑\/↓)/.test(line)) {
+    base = COOL_MUTED
+  }
+
+  if (/^(warning:|submitting\.\.\.)/.test(line)) base = AMBER
+  if (/^(error:|✗ rejected)/.test(line)) base = CORAL
+
+  if (line.startsWith('>')) {
+    return base + styledSpan('>', LIME, base, true) + line.slice(1) + RESET_STYLE
+  }
+
+  if (/[╭╮╰╯│─]/.test(line)) {
+    let bitmap = line
+    bitmap = styledMatches(bitmap, /[╭╮╰╯│─]+/g, COOL_BORDER, base)
+    bitmap = styledMatches(bitmap, /█+/g, LIME, base, true)
+    bitmap = styledMatches(bitmap, /×+/g, CORAL, base, true)
+    bitmap = styledMatches(bitmap, /·+/g, COOL_BORDER, base)
+    return base + bitmap + RESET_STYLE
+  }
+
+  let styled = styledMatches(line, / · /g, COOL_BORDER, base)
+  styled = styledMatches(styled, /^connected/, LIME, base, true)
+  styled = styledMatches(styled, /\bYOU\b/g, LIME, base, true)
+  styled = styledMatches(
+    styled,
+    /(?:target matched|exact match|SOLVED PROGRAM|✓ BONUS|\[ENTER\] join)/g,
+    LIME,
+    base,
+    true
+  )
+  styled = styledMatches(
+    styled,
+    /(?:target mismatch|\d+ mismatches?|invalid|error:)/g,
+    CORAL,
+    base,
+    true
+  )
+  styled = styledMatches(styled, /warning:/g, AMBER, base, true)
+  styled = styledMatches(styled, /█+/g, LIME, base, true)
+  styled = styledMatches(styled, /×+/g, CORAL, base, true)
+
+  return base + styled + RESET_STYLE
+}
+
+function styledMatches(value, pattern, color, restore, bold = false) {
+  return value.replace(pattern, (match) => styledSpan(match, color, restore, bold))
+}
+
+function styledSpan(value, color, restore, bold = false) {
+  const weight = bold ? BOLD : ''
+  const normal = bold ? NORMAL_WEIGHT : ''
+  return `${weight}${color}${value}${normal}${restore}`
+}
+
 function absoluteCursorPosition(column, row) {
   if (row === 0) return CSI + `1;${column + 1}H`
   return ansiEscapes.cursorPosition(column, row)
@@ -896,19 +1482,26 @@ function formatEditorInput(program, cursor, columns) {
   }
 }
 
-function formatBitmap(bitmap) {
-  const lines = ['┌────────┐']
+function formatBitmap(bitmap, onPixel = '█', formatPixel = null) {
+  const lines = [`╭${'─'.repeat(BITMAP_INNER_WIDTH)}╮`]
   const hasBitmap =
     Array.isArray(bitmap) &&
-    bitmap.length === 8 &&
-    bitmap.every((bitmapRow) => Array.isArray(bitmapRow) && bitmapRow.length === 8)
+    bitmap.length === BITMAP_SIZE &&
+    bitmap.every((bitmapRow) => Array.isArray(bitmapRow) && bitmapRow.length === BITMAP_SIZE)
 
-  for (let y = 0; y < 8; y++) {
-    const pixels = hasBitmap ? bitmap[y].map((pixel) => (pixel ? '█' : '·')).join('') : '        '
+  for (let y = 0; y < BITMAP_SIZE; y++) {
+    const pixels = hasBitmap
+      ? bitmap[y]
+          .map((pixel, x) => {
+            const glyph = formatPixel === null ? (pixel ? onPixel : '·') : formatPixel(pixel, x, y)
+            return glyph.repeat(PIXEL_WIDTH)
+          })
+          .join('')
+      : ' '.repeat(BITMAP_INNER_WIDTH)
     lines.push(`│${pixels}│`)
   }
 
-  lines.push('└────────┘')
+  lines.push(`╰${'─'.repeat(BITMAP_INNER_WIDTH)}╯`)
   return lines
 }
 
@@ -916,14 +1509,27 @@ function formatChallengeBitmaps(output, target, diff, columns) {
   const panels = [
     { label: 'OUTPUT', bitmap: output },
     { label: 'TARGET', bitmap: target },
-    { label: 'DIFF', bitmap: diff }
+    {
+      label: 'DIFF',
+      bitmap: diff,
+      formatPixel(mismatch, x, y) {
+        if (mismatch) return MISMATCH_PIXEL
+        if (output[y][x] && target[y][x]) return ' '
+        return '·'
+      }
+    }
   ]
   const panelGap = ' '
+  const available = Math.max(1, columns - 1)
+  const threePanels = BITMAP_PANEL_WIDTH * 3
+  const twoPanels = BITMAP_PANEL_WIDTH * 2
 
-  if (columns >= 33) return formatBitmapRow(panels, panelGap)
-  if (columns >= 31) return formatBitmapRow(panels, '')
+  if (available >= threePanels + panelGap.length * 2) {
+    return formatBitmapRow(panels, panelGap)
+  }
+  if (available >= threePanels) return formatBitmapRow(panels, '')
 
-  if (columns >= 22) {
+  if (available >= twoPanels + panelGap.length) {
     return [
       ...formatBitmapRow(panels.slice(0, 2), panelGap),
       '',
@@ -931,7 +1537,7 @@ function formatChallengeBitmaps(output, target, diff, columns) {
     ]
   }
 
-  if (columns >= 21) {
+  if (available >= twoPanels) {
     return [...formatBitmapRow(panels.slice(0, 2), ''), '', ...formatBitmapRow(panels.slice(2), '')]
   }
 
@@ -945,11 +1551,37 @@ function formatChallengeBitmaps(output, target, diff, columns) {
   return lines
 }
 
+function formatTutorialBitmaps(target, output, columns) {
+  return formatBitmapCollection(
+    [
+      { label: 'TARGET', bitmap: target },
+      { label: 'YOUR OUTPUT', bitmap: output }
+    ],
+    columns
+  )
+}
+
+function formatBitmapCollection(panels, columns) {
+  const available = Math.max(1, columns - 1)
+  const panelWidth = Math.max(BITMAP_PANEL_WIDTH, ...panels.map((panel) => panel.label.length))
+  const perRow = Math.min(3, Math.max(1, Math.floor((available + 1) / (panelWidth + 1))))
+  const lines = []
+
+  for (let index = 0; index < panels.length; index += perRow) {
+    if (lines.length > 0) lines.push('')
+    lines.push(...formatBitmapRow(panels.slice(index, index + perRow), ' '))
+  }
+
+  return lines
+}
+
 function formatBitmapRow(panels, gap) {
-  const bitmaps = panels.map((panel) => formatBitmap(panel.bitmap))
+  const bitmaps = panels.map((panel) =>
+    formatBitmap(panel.bitmap, panel.onPixel, panel.formatPixel)
+  )
   const lines = [
     panels
-      .map((panel) => panel.label.padEnd(10))
+      .map((panel) => panel.label.padEnd(BITMAP_PANEL_WIDTH))
       .join(gap)
       .trimEnd()
   ]
@@ -968,11 +1600,48 @@ function formatDiff(diff) {
   for (const row of diff) for (const pixel of row) if (pixel) mismatches++
 
   if (mismatches === 0) return 'DIFF · exact match'
-  return `DIFF · ${mismatches} ${mismatches === 1 ? 'mismatch' : 'mismatches'} · █ marks a mismatch`
+  return `DIFF · ${mismatches} ${mismatches === 1 ? 'mismatch' : 'mismatches'} · ${MISMATCH_PIXEL} marks a mismatch`
+}
+
+function formatPixelMatch(diff) {
+  if (diff === null) return '— / 64 pixels'
+
+  let matches = 64
+  for (const row of diff) for (const pixel of row) if (pixel) matches--
+  return `${matches} / 64 pixels`
+}
+
+function formatBytes(size) {
+  return `${size} ${size === 1 ? 'byte' : 'bytes'}`
+}
+
+function wrapCopy(copy, columns) {
+  const width = Math.max(10, columns - 1)
+  const wrapped = []
+
+  for (const source of copy) {
+    const words = source.split(' ')
+    let line = ''
+
+    for (const word of words) {
+      if (line.length === 0) {
+        line = word
+      } else if (line.length + word.length + 1 <= width) {
+        line += ` ${word}`
+      } else {
+        wrapped.push(line)
+        line = word
+      }
+    }
+
+    wrapped.push(line)
+  }
+
+  return wrapped
 }
 
 function formatEvaluation(evaluation, matched = null) {
-  const bytes = `${evaluation.size} ${evaluation.size === 1 ? 'byte' : 'bytes'}`
+  const bytes = formatBytes(evaluation.size)
 
   if (evaluation.status === 'valid') {
     if (matched === true) return `${bytes} · target matched`
@@ -986,12 +1655,35 @@ function formatEvaluation(evaluation, matched = null) {
   return `${bytes} · incomplete`
 }
 
-function formatLeaderboard(leaderboard, playerKey = null) {
-  const lines = [row('SCORE', 'PLAYER', 'PROGRAM')]
+function formatTutorialEvaluation(evaluation) {
+  const prefix = `${formatBytes(evaluation.size)} · stack ${evaluation.stackDepth}`
+
+  if (evaluation.status === 'valid') return `${prefix} · valid`
+  if (evaluation.status === 'invalid') return `${prefix} · invalid`
+  if (evaluation.stackDepth > 0) return `${prefix} · incomplete · top preview`
+  return `${prefix} · incomplete`
+}
+
+function formatLeaderboard(leaderboard, playerKey = null, columns = DEFAULT_COLUMNS) {
+  const width = Math.max(1, columns - 1)
+  const stacked = width - PROGRAM_COLUMN_OFFSET < MIN_INLINE_PROGRAM_WIDTH
+  const lines = stacked ? ['SCORE · PLAYER', 'PROGRAM'] : [row('SCORE', 'PLAYER', 'PROGRAM')]
 
   for (const entry of leaderboard || []) {
     const player = playerKey !== null && entry.author === playerKey ? 'YOU' : shortKey(entry.author)
-    lines.push(row(entry.score, player, displayProgram(entry.program)))
+    const program = displayProgram(entry.program)
+
+    if (stacked) {
+      lines.push(`${entry.score} · ${player}`, ...wrapFixed(program, width))
+      continue
+    }
+
+    const chunks = wrapFixed(program, width - PROGRAM_COLUMN_OFFSET)
+    lines.push(row(entry.score, player, chunks[0]))
+
+    for (let index = 1; index < chunks.length; index++) {
+      lines.push(' '.repeat(PROGRAM_COLUMN_OFFSET) + chunks[index])
+    }
   }
 
   return lines
@@ -1010,7 +1702,7 @@ function singleLine(value) {
 }
 
 function row(score, player, program) {
-  return `${String(score).padEnd(8)}${String(player).padEnd(13)}${program}`
+  return `${String(score).padEnd(SCORE_COLUMN_WIDTH)}${String(player).padEnd(PLAYER_COLUMN_WIDTH)}${program}`
 }
 
 function shortKey(key) {
@@ -1023,8 +1715,15 @@ function displayProgram(program) {
   const tokenized = tokenizeProgram(source)
   const canonical = tokenized.ok ? tokenized.tokens.join('') : source.replace(/\s/g, '')
   const json = JSON.stringify(canonical)
-  const escaped = json.slice(1, -1)
+  return json.slice(1, -1)
+}
 
-  if (escaped.length <= MAX_DISPLAY_PROGRAM_LENGTH) return escaped
-  return escaped.slice(0, MAX_DISPLAY_PROGRAM_LENGTH - 1) + '…'
+function wrapFixed(value, width) {
+  if (value.length === 0) return ['']
+
+  const lines = []
+  for (let start = 0; start < value.length; start += width) {
+    lines.push(value.slice(start, start + width))
+  }
+  return lines
 }

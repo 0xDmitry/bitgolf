@@ -64,6 +64,116 @@ test('terminal labels the local player and safely shortens other player ids', as
   t.ok(screen.includes('\\u001b[31mx'))
   t.absent(screen.includes('\u001b[31m'))
   t.ok(screen.includes('✓ submitted · score 1'))
+  t.ok(chunks[chunks.length - 1].includes('\nPROGRAM\n\n> \n\n✓ submitted · score 1'))
+})
+
+test('leaderboard wraps complete programs instead of truncating them', async (t) => {
+  const { input, output, chunks } = interactiveStreams()
+  const program = 'abcdef!&|^'.repeat(15)
+  const terminal = new Terminal({ input, output })
+
+  output.columns = 40
+  output.rows = 24
+  t.teardown(() => terminal.close(), { force: true })
+
+  await terminal.ready()
+  terminal.updateState({
+    playerKey: '91ac72' + '0'.repeat(58),
+    peers: 0,
+    leaderboards: {
+      [CHALLENGE_ID]: [
+        {
+          score: 79,
+          author: '91ac72' + '0'.repeat(58),
+          program
+        }
+      ]
+    }
+  })
+
+  input.write('3')
+  await tick()
+
+  let lines = plainLatestScreen(chunks).split('\r\n')
+  let rowIndex = lines.findIndex((line) => line.startsWith('79'.padEnd(8)))
+  const wrappedLines = Math.ceil(program.length / 18)
+  const displayed = [
+    lines[rowIndex].slice(21),
+    ...lines.slice(rowIndex + 1, rowIndex + wrappedLines).map((line) => line.slice(21))
+  ].join('')
+
+  t.is(displayed, program)
+  t.absent(plainLatestScreen(chunks).includes('…'))
+
+  output.columns = 20
+  output.emit('resize')
+  await tick()
+
+  lines = plainLatestScreen(chunks).split('\r\n')
+  rowIndex = lines.indexOf('79 · YOU')
+  const stackedLines = Math.ceil(program.length / 19)
+
+  t.is(lines.slice(rowIndex + 1, rowIndex + 1 + stackedLines).join(''), program)
+  t.absent(plainLatestScreen(chunks).includes('…'))
+})
+
+test('warnings render directly below connection status on every screen', async (t) => {
+  const { input, output, chunks } = interactiveStreams()
+  const terminal = new Terminal({ input, output })
+
+  output.rows = 60
+  t.teardown(() => terminal.close(), { force: true })
+
+  await terminal.ready()
+  terminal.updateState({
+    playerKey: '91ac72' + '0'.repeat(58),
+    peers: 0,
+    leaderboards: { [CHALLENGE_ID]: [] }
+  })
+
+  for (const view of [
+    'menu',
+    'tutorial',
+    'tutorial-complete',
+    'mask-reference',
+    'challenge',
+    'leaderboard'
+  ]) {
+    terminal.view = view
+    terminal.showWarning('connection reset by peer')
+    await tick()
+    t.ok(
+      plainLatestScreen(chunks).includes(
+        'connected · 0 peers\r\nwarning: connection reset by peer'
+      ),
+      `${view} warning follows connection status`
+    )
+  }
+
+  const pipedInput = new PassThrough()
+  const pipedOutput = new PassThrough()
+  const pipedChunks = []
+  const pipedTerminal = new Terminal({ input: pipedInput, output: pipedOutput })
+
+  pipedOutput.setEncoding('utf8')
+  pipedOutput.on('data', (chunk) => pipedChunks.push(chunk))
+  t.teardown(() => pipedTerminal.close(), { force: true })
+
+  await pipedTerminal.ready()
+  pipedTerminal.updateState({
+    playerKey: '91ac72' + '0'.repeat(58),
+    peers: 0,
+    leaderboards: { [CHALLENGE_ID]: [] }
+  })
+  pipedTerminal.showWarning('connection reset by peer')
+  await tick()
+
+  t.ok(
+    pipedChunks[pipedChunks.length - 1].includes(
+      'connected · 0 peers\nwarning: connection reset by peer'
+    ),
+    'combined warning follows connection status'
+  )
 })
 
 test('terminal accepts piped lines and renders remote state updates', async (t) => {
@@ -121,7 +231,7 @@ test('interactive terminal opens with a descriptive navigable menu', async (t) =
   t.ok(screen.includes('Draw 8×8 monochrome images with tiny postfix Boolean programs.'))
   t.ok(screen.includes('Every token costs one byte. Lower scores lead the shared leaderboard.'))
   t.ok(screen.includes('connecting...'))
-  t.ok(screen.includes('› 1  Start tutorial'))
+  t.ok(screen.includes('› 1  Tutorial'))
   t.ok(screen.includes('  2  Solve challenge'))
   t.ok(screen.includes('  3  Leaderboard'))
   t.ok(screen.includes('↑/↓ choose · ENTER open · 1-3 shortcut · Ctrl+C quit'))
@@ -161,10 +271,16 @@ test('interactive terminal opens with a descriptive navigable menu', async (t) =
   input.write('1')
   await tick()
   t.is(terminal.view, 'tutorial')
+  t.is(terminal.tutorialStageKey, '1')
   t.is(firstVisibleLine(chunks), 'connected · 0 peers')
-  t.ok(plainLatestScreen(chunks).startsWith('\r\n\r\nconnected · 0 peers'))
-  t.ok(plainLatestScreen(chunks).includes('connected · 0 peers\r\n\r\nTUTORIAL'))
-  t.ok(plainLatestScreen(chunks).includes('TUTORIAL 1/3 · Coordinate bits'))
+  t.ok(
+    plainLatestScreen(chunks).includes(
+      'connected · 0 peers\r\n\r\nBIT GOLF — TUTORIAL 1/8 · MASKS\r\n\r\nTARGET'
+    )
+  )
+  t.ok(plainLatestScreen(chunks).includes('MASKS'))
+  t.ok(plainLatestScreen(chunks).includes('TARGET'))
+  t.ok(plainLatestScreen(chunks).includes('YOUR OUTPUT'))
 
   await pressEscape(input)
   input.write('3')
@@ -203,7 +319,7 @@ test('short main menu truncates from the top and redraws safely after resize', a
   t.absent(screen.includes('Draw 8×8 monochrome images'))
   t.absent(screen.includes('Every token costs one byte'))
   t.ok(screen.includes('Choose a path:'))
-  t.ok(screen.includes('› 1  Start tutorial'))
+  t.ok(screen.includes('› 1  Tutorial'))
   t.ok(screen.includes('  2  Solve challenge'))
   t.ok(screen.includes('  3  Leaderboard'))
   t.ok(screen.includes('↑/↓ choose · ENTER open · 1-3 shortcut · Ctrl+C quit'))
@@ -215,7 +331,7 @@ test('short main menu truncates from the top and redraws safely after resize', a
   t.ok(redraw.endsWith('\u001b[?7h\u001b[?25l\u001b[1;1H'))
 })
 
-test('tutorial treats CRLF as one step and completes into the challenge', async (t) => {
+test('tutorial solution waits for Enter and CRLF advances exactly one stage', async (t) => {
   const { input, output, chunks } = interactiveStreams()
   const programs = []
   const terminal = new Terminal({ input, output })
@@ -227,37 +343,31 @@ test('tutorial treats CRLF as one step and completes into the challenge', async 
   input.write('1')
   await tick()
 
-  t.is(terminal.tutorialPage, 0)
-  t.ok(plainLatestScreen(chunks).includes('TUTORIAL 1/3 · Coordinate bits'))
+  t.is(terminal.tutorialStageKey, '1')
+  t.ok(plainLatestScreen(chunks).includes('BIT GOLF — TUTORIAL 1/8'))
+
+  input.write('c')
+  await tick()
+
+  t.is(terminal.tutorialStageKey, '1')
+  t.ok(terminal.tutorialSolved)
+  t.ok(plainLatestScreen(chunks).includes('64 / 64 pixels'))
+  t.ok(plainLatestScreen(chunks).includes('✓ SOLVED'))
+  t.ok(plainLatestScreen(chunks).includes('ENTER continue'))
+  t.alike(programs, [])
 
   input.write('\r\n')
   await tick()
 
   t.is(terminal.view, 'tutorial')
-  t.is(terminal.tutorialPage, 1)
-  t.ok(plainLatestScreen(chunks).includes('TUTORIAL 2/3 · Postfix operators'))
-  t.absent(plainLatestScreen(chunks).includes('TUTORIAL 3/3'))
-
-  input.write('\r\n')
-  await tick()
-
-  t.is(terminal.tutorialPage, 2)
-  t.ok(plainLatestScreen(chunks).includes('TUTORIAL 3/3 · Valid programs and scoring'))
-  t.ok(plainLatestScreen(chunks).includes('Only programs that draw the target can be submitted'))
-  t.ok(plainLatestScreen(chunks).includes('The live preview and diff update after every edit.'))
-  t.ok(plainLatestScreen(chunks).includes('ENTER solve challenge'))
-
-  input.write('\r\n')
-  await tick()
-
-  t.is(terminal.view, 'challenge')
-  t.ok(plainLatestScreen(chunks).includes('OUTPUT'))
-  t.absent(plainLatestScreen(chunks).includes('SOLVE CHALLENGE'))
+  t.is(terminal.tutorialStageKey, '2')
+  t.ok(plainLatestScreen(chunks).includes('BIT GOLF — TUTORIAL 2/8'))
+  t.ok(plainLatestScreen(chunks).includes('TURN IT'))
   t.is(terminal.readline.line, '')
   t.alike(programs, [])
 })
 
-test('short tutorial keeps its footer and truncates content from the top', async (t) => {
+test('short tutorial keeps its editor and paging footer visible', async (t) => {
   const { input, output, chunks } = interactiveStreams()
   output.rows = 10
 
@@ -270,10 +380,10 @@ test('short tutorial keeps its footer and truncates content from the top', async
 
   const screen = plainLatestScreen(chunks)
   t.absent(screen.includes('connecting...'))
-  t.ok(screen.includes('TUTORIAL 1/3 · Coordinate bits'))
-  t.ok(screen.includes('Example: a lights the right half; d lights the bottom half.'))
-  t.ok(screen.includes('\r\n\r\n←/→ step · ENTER next · Esc menu'))
-  t.absent(screen.includes('PgUp/PgDn'))
+  t.ok(screen.includes('PROGRAM'))
+  t.ok(screen.includes('> '))
+  t.ok(screen.includes('PgUp/PgDn view · ? hint · Esc leave'))
+  t.absent(screen.includes('TUTORIAL 1/3'))
 })
 
 test('challenge renders the exact target and a meaningful live diff', async (t) => {
@@ -292,6 +402,11 @@ test('challenge renders the exact target and a meaningful live diff', async (t) 
   t.ok(screen.includes('OUTPUT     TARGET     DIFF'))
   t.ok(screen.includes(emptyPanels))
   t.ok(screen.includes('DIFF · unavailable until output can be evaluated'))
+  t.ok(
+    screen.includes(
+      '0 bytes · incomplete\r\nDIFF · unavailable until output can be evaluated\r\n\r\nPROGRAM\r\n\r\n> '
+    )
+  )
   t.ok(screen.includes('ENTER when matched · Esc menu'))
 
   input.write('a')
@@ -405,7 +520,7 @@ test('terminal reevaluates live edits and only submits target matches', async (t
   t.absent(redraw.includes('\n'))
   t.absent(redraw.includes('\u001b[2J'))
   t.is(redraw.split('\u001b[2K').length - 1, output.rows)
-  t.ok(redraw.endsWith('\u001b[18;4H'))
+  t.ok(redraw.endsWith('\u001b[20;4H'))
   t.absent(chunks.join('').includes('\u001b[?1049h'))
   t.absent(chunks.join('').includes('\u001b[3J'))
   t.is(chunks.join('').split('\u001b[2J\u001b[H').length - 1, 1)
@@ -613,6 +728,7 @@ test('challenge shows submission feedback without embedding the leaderboard', as
   t.ok(screen.includes('OUTPUT'))
   t.ok(screen.includes('PROGRAM'))
   t.ok(screen.includes('submitting...'))
+  t.ok(screen.includes('PROGRAM\r\n\r\n> \r\nsubmitting...'))
   t.ok(screen.includes('ENTER when matched · Esc menu'))
 
   input.write('a')
@@ -625,6 +741,7 @@ test('challenge shows submission feedback without embedding the leaderboard', as
   t.absent(screen.includes('SCORE   PLAYER       PROGRAM'))
   t.ok(screen.includes('1 byte · syntax valid · target mismatch'))
   t.ok(screen.includes('✓ submitted · score 1'))
+  t.ok(screen.includes('PROGRAM\r\n\r\n> a\r\n✓ submitted · score 1'))
   t.ok(screen.includes('ENTER when matched · Esc menu'))
 })
 

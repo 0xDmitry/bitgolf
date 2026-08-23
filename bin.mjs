@@ -8,6 +8,9 @@ import pkg from './package.json'
 import App from './app.js'
 import Terminal from './terminal.js'
 import SubmissionCoordinator from './submission-coordinator.js'
+import tutorialStateStorage from './tutorial/state.js'
+
+const { freshTutorialState, loadTutorialState, saveTutorialState } = tutorialStateStorage
 
 const appName = pkg.productName || pkg.name
 const isDev = path.basename(Bare.argv[0]) === (isWindows ? 'bare.exe' : 'bare')
@@ -31,6 +34,15 @@ if (cmd.flags.version) {
 const updates = isDev ? cmd.flags.updates : true
 const storage = cmd.flags.storage || (isDev ? null : path.join(persistent(), appName))
 const dir = storage || path.join(os.tmpdir(), 'pear', appName)
+let tutorialState
+let tutorialStateWarning = null
+
+try {
+  tutorialState = await loadTutorialState(dir)
+} catch (err) {
+  tutorialState = freshTutorialState()
+  tutorialStateWarning = `tutorial progress could not be loaded: ${err.message}`
+}
 
 const app = new App({
   dir,
@@ -40,7 +52,14 @@ const app = new App({
   upgrade: pkg.upgrade,
   name: isWindows ? appName + '.exe' : appName
 })
-const terminal = new Terminal({ input: process.stdin, output: process.stdout })
+const terminal = new Terminal({
+  input: process.stdin,
+  output: process.stdout,
+  tutorialState,
+  persistTutorialState(state) {
+    return saveTutorialState(dir, state)
+  }
+})
 
 let stopping = null
 let updateLock = null
@@ -79,6 +98,7 @@ try {
   if (app.updateApplied) await stop(0)
   else {
     await terminal.ready()
+    if (tutorialStateWarning !== null) terminal.showWarning(tutorialStateWarning)
     submissions.markInitialized()
   }
 } catch (err) {
